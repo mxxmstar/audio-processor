@@ -1,17 +1,25 @@
-# Python
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/
+dist/
+
+# Legacy Python
+.venv/
 __pycache__/
 *.pyc
-.venv/
-venv/
 
-# 测试音频等大型二进制样本（按需保留或忽略）
-*.mp3
-*.wav
-*.flac
-
-# 大型二进制工具（超过 GitHub 100MB 限制，本地保留不纳入版本库）
-bin/ffmpeg.exe
-
-# 系统/编辑器
+# OS
 .DS_Store
 Thumbs.db
+
+# 图标生成临时源（真正图标在 src-tauri/icons/）
+src-tauri/icon-src.png
+
+# Keep test sample
+!*.mp3
+
+# 保留运行时资源（fpcalc.exe 必须随附）
+!bin/
