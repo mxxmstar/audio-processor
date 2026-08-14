@@ -1,9 +1,6 @@
 // 子模块声明
-pub mod commands;     // Tauri 命令（单独成模块，避免与 generate_handler! 的宏同名冲突）
-pub mod fingerprint;  // 音频解码 + Chromaprint 指纹生成
-pub mod acoustid;     // AcoustID 指纹查询
-pub mod musicbrainz;  // MusicBrainz 曲目详情查询
-pub mod error;        // 统一错误类型
+pub mod commands;       // Tauri 命令（桥接层，仅负责前端调用与 fpcalc 资源路径解析）
+pub mod recognizer;     // 音频识别独立模块（指纹/查询/错误集中于此，与 Tauri 解耦）
 
 /// Tauri 应用入口（由 `main.rs` 调用）。
 /// 负责构建并运行 Tauri 运行时，注册命令、插件与窗口配置。

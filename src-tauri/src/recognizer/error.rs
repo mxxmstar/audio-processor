@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// 应用统一的错误类型。
+/// 音频识别模块统一的错误类型。
 /// 使用 `thiserror` 宏为每种错误自动生成 `Display` 实现，
 /// 前端拿到的是已经本地化（中文）的错误描述字符串。
 #[derive(Error, Debug)]

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::process::Command;
 
-use crate::error::{AppError, Result};
+use crate::recognizer::error::{AppError, Result};
 
 /// fpcalc 进程输出的 JSON 结构。
 /// 形如：{"duration": 242.04, "fingerprint": "<base64 压缩指纹>"}

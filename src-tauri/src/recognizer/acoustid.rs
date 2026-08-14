@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::error::{AppError, Result};
+use crate::recognizer::error::{AppError, Result};
 
 /// AcoustID 开放 API 的客户端密钥（client key）。
 /// 注意：生产环境建议改为从配置文件读取，避免硬编码。
@@ -49,7 +49,7 @@ struct Artist {
     name: String,
 }
 
-/// 经过整理后返回给 `lib.rs` 的匹配数据。
+/// 经过整理后返回给 `mod.rs` 的匹配数据。
 pub struct AcoustidMatch {
     pub recording_id: String,   // 录音 ID
     pub title: String,          // 标题

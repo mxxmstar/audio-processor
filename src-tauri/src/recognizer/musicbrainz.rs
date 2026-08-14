@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::error::{AppError, Result};
+use crate::recognizer::error::{AppError, Result};
 
 /// MusicBrainz 录音接口返回结构。
 #[derive(Deserialize)]
@@ -19,7 +19,7 @@ struct Release {
     date: Option<String>,       // 发行日期（可能缺失）
 }
 
-/// 整理后返回给 `lib.rs` 的专辑信息。
+/// 整理后返回给 `mod.rs` 的专辑信息。
 pub struct RecordingInfo {
     pub album: Option<String>,
     pub album_date: Option<String>,
