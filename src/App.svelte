@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
 
+  // Svelte 5 响应式状态：使用 $state 让变量变化能触发界面更新
   interface SongInfo {
     title: string;
     artist: string;
@@ -10,29 +11,42 @@
     confidence: number;
   }
 
-  let info: SongInfo | null = null;
-  let errorMsg: string | null = null;
-  let loading = false;
+  // 识别结果（null 表示尚未识别/已清空）
+  let info = $state<SongInfo | null>(null);
+  // 错误提示（null 表示无错误）
+  let errorMsg = $state<string | null>(null);
+  // 是否正在识别（用于禁用按钮并显示“识别中…”）
+  let loading = $state(false);
 
+  // 点击按钮：打开文件选择框并识别
   async function pickAndIdentify() {
-    const selected = await open({
-      multiple: false,
-      filters: [
-        {
-          name: "音频文件",
-          extensions: ["mp3", "flac", "wav", "m4a", "aac"],
-        },
-      ],
-    });
-    if (!selected || Array.isArray(selected)) return;
-    await runIdentify(selected as string);
+    try {
+      // 调用 Tauri 对话框插件打开系统文件选择器
+      const selected = await open({
+        multiple: false, // 单选
+        filters: [
+          {
+            name: "音频文件",
+            extensions: ["mp3", "flac", "wav", "m4a", "aac"],
+          },
+        ],
+      });
+      // 用户取消或未选择文件时直接返回
+      if (!selected || Array.isArray(selected)) return;
+      await runIdentify(selected as string);
+    } catch (e) {
+      // 文件对话框调用失败（如插件未注册/权限不足）时给出明确提示
+      errorMsg = "打开文件对话框失败：" + String(e);
+    }
   }
 
+  // 调用 Rust 端 identify 命令识别音频
   async function runIdentify(path: string) {
     loading = true;
     errorMsg = null;
     info = null;
     try {
+      // invoke 通过 Tauri IPC 调用后端命令
       info = await invoke<SongInfo>("identify", { path });
     } catch (e) {
       errorMsg = String(e);
@@ -46,7 +60,7 @@
   <h1>音频指纹识别</h1>
   <p class="sub">选择本地音频文件，识别曲目信息（基于 AcoustID + MusicBrainz）</p>
 
-  <button on:click={pickAndIdentify} disabled={loading}>
+  <button onclick={pickAndIdentify} disabled={loading}>
     {loading ? "识别中…" : "选择音频文件"}
   </button>
 
