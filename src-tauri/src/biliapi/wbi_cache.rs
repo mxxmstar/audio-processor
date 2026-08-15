@@ -5,9 +5,11 @@
 //! 缓存有效期 24 小时（与 Go 版策略一致）。
 
 use crate::biliapi::error::{BiliApiError, Result};
+use crate::biliapi::storage;
 use crate::biliapi::types::{BaseRes, NavData};
 use crate::http_client::client::HttpClient;
 use crate::http_client::types::{HttpMethod, RequestConfig};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,11 +24,26 @@ struct Cache {
 /// 全局 WBI key 缓存（进程内单例）
 static WBI_CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 
+/// 落盘目录（可由 Tauri 层在启动时通过 `set_cache_dir` 注入）。
+/// 为 `None` 时自动探测（见 `storage::resolve_dir`）。
+static CACHE_DIR: Mutex<Option<Option<std::path::PathBuf>>> = Mutex::new(None);
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 设置落盘目录（Tauri 启动时调用，传入 `app_config_dir`）。
+/// 传 `None` 恢复自动探测。
+pub fn set_cache_dir(dir: Option<&Path>) {
+    *CACHE_DIR.lock().unwrap() = Some(dir.map(|p| p.to_path_buf()));
+}
+
+/// 取当前生效的落盘目录（已显式设置则用之，否则 `None` 走自动探测）。
+fn cache_dir() -> Option<Option<std::path::PathBuf>> {
+    CACHE_DIR.lock().unwrap().clone()
 }
 
 /// 从 nav 接口获取拼接后的 wbi key（`imgKey + subKey`）并算出 mixinKey。
@@ -57,13 +74,13 @@ async fn fetch_mixin_key(sessdata: &str) -> Result<String> {
     Ok(crate::http_client::wbi::get_mixin_key(&img_key, &sub_key))
 }
 
-/// 获取 mixinKey，优先使用缓存（24h 内有效）。
+/// 获取 mixinKey，优先内存缓存 → 落盘缓存 → 重新拉取（24h 内有效）。
 pub async fn get_mixin_key(sessdata: &str) -> Result<String> {
     if sessdata.is_empty() {
         return Err(BiliApiError::EmptySessdata);
     }
 
-    // 命中缓存且未过期
+    // 1) 内存缓存命中
     {
         let guard = WBI_CACHE.lock().unwrap();
         if let Some(c) = guard.as_ref() {
@@ -73,7 +90,18 @@ pub async fn get_mixin_key(sessdata: &str) -> Result<String> {
         }
     }
 
-    // 未命中或已过期：重新拉取
+    // 2) 落盘缓存命中（阶段 4.2）
+    let dir = cache_dir();
+    if let Some(key) = storage::load_wbi(dir.as_ref().map(|o| o.as_deref()).flatten()) {
+        let mut guard = WBI_CACHE.lock().unwrap();
+        *guard = Some(Cache {
+            key: key.clone(),
+            fetched_at: now_secs(),
+        });
+        return Ok(key);
+    }
+
+    // 3) 未命中或已过期：重新拉取并写回内存 + 落盘
     let key = fetch_mixin_key(sessdata).await?;
     {
         let mut guard = WBI_CACHE.lock().unwrap();
@@ -82,10 +110,12 @@ pub async fn get_mixin_key(sessdata: &str) -> Result<String> {
             fetched_at: now_secs(),
         });
     }
+    storage::save_wbi(dir.as_ref().map(|o| o.as_deref()).flatten(), &key);
     Ok(key)
 }
 
 /// 清除缓存（测试或登录态变更时调用）
 pub fn clear_cache() {
     *WBI_CACHE.lock().unwrap() = None;
+    storage::clear_wbi(cache_dir().as_ref().map(|o| o.as_deref()).flatten());
 }

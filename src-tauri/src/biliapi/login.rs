@@ -3,9 +3,11 @@
 
 use crate::biliapi::client::{BiliClient, BASE_API, BASE_PASSPORT};
 use crate::biliapi::error::{BiliApiError, Result};
+use crate::biliapi::storage;
 use crate::biliapi::types;
 use crate::http_client::client::HttpClient;
 use crate::http_client::types::{HttpMethod, RequestConfig};
+use std::path::Path;
 
 /// 获取登录二维码信息
 /// 对应 `passport.bilibili.com/x/passport-login/web/qrcode/generate`
@@ -46,6 +48,20 @@ pub async fn get_qr_status(qr_key: &str) -> Result<(types::QrStatus, Option<Stri
     Ok((status, sessdata))
 }
 
+/// 扫码成功后持久化 SESSDATA（阶段 4.3）。
+/// 传入从 `get_qr_status` 拿到的 SESSDATA；为空则忽略。
+/// 同时清掉可能已失效的 WBI 落盘缓存，下次请求强制刷新。
+pub fn persist_login(dir: Option<&Path>, sessdata: Option<&str>) {
+    match sessdata {
+        Some(s) if !s.is_empty() => {
+            storage::save_sessdata(dir, Some(s));
+            storage::clear_wbi(dir);
+            crate::biliapi::wbi_cache::clear_cache();
+        }
+        _ => {}
+    }
+}
+
 /// 从 Set-Cookie 头值中提取 SESSDATA
 /// 头可能包含多个 cookie，形如 `SESSDATA=xxx; Expires=...`
 fn extract_sessdata(header: &str) -> Option<String> {
@@ -60,8 +76,9 @@ fn extract_sessdata(header: &str) -> Option<String> {
     None
 }
 
-/// 检查是否已登录
-/// 对应 `x/space/myinfo`
+/// 检查指定 SESSDATA 是否有效（对应 `x/space/myinfo`）。
+/// 返回 `Ok(true)` 有效 / `Ok(false)` 失效（业务错误码视为未登录）；
+/// 网络等基础设施错误向上抛出。
 pub async fn check_login(sessdata: &str) -> Result<bool> {
     if sessdata.is_empty() {
         return Ok(false);
@@ -73,4 +90,30 @@ pub async fn check_login(sessdata: &str) -> Result<bool> {
         Err(BiliApiError::Api { .. }) => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// 启动时自动加载持久化 SESSDATA 并校验（阶段 4.3）。
+/// 返回 `Ok(Some(sessdata))` 表示已有有效登录态；`Ok(None)` 表示需重新扫码。
+/// 加载或校验过程中任何落盘/网络故障都降级为 `None`（不致命）。
+pub async fn load_and_check(dir: Option<&Path>) -> Result<Option<String>> {
+    let sessdata = match storage::load_sessdata(dir) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    if check_login(&sessdata).await? {
+        Ok(Some(sessdata))
+    } else {
+        // 登录态失效：清除落盘，提示重新扫码
+        storage::clear_sessdata(dir);
+        storage::clear_wbi(dir);
+        Ok(None)
+    }
+}
+
+/// 高层封装：确保存在有效登录态。
+/// - 若已有有效持久化 SESSDATA，直接返回它（无需扫码）；
+/// - 否则返回 `None`，调用方应发起扫码登录流程，
+///   并在 `get_qr_status` 成功后调用 `persist_login` 落盘。
+pub async fn ensure_login(dir: Option<&Path>) -> Result<Option<String>> {
+    load_and_check(dir).await
 }

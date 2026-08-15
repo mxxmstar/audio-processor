@@ -25,3 +25,9 @@ src-tauri/icon-src.png
 !bin/
 bilidown/
 bilidownload/
+
+# 登录态持久化（含 SESSDATA，切勿提交）
+src-tauri/auth.json
+src-tauri/wbi_cache.json
+auth.json
+wbi_cache.json
