@@ -19,17 +19,18 @@ pub fn run() {
             if let Ok(dir) = app.path().app_config_dir() {
                 app.state::<BiliState>().init_config_dir(dir);
             }
-            // 注入 ffmpeg 搜索目录
-            // - 开发期：直接用项目根 bin/（CARGO_MANIFEST_DIR/../bin），最可靠
-            // - 打包后：取 resource_dir（ffmpeg 由 tauri.conf.json 的 resources 分发）
-            let ffmpeg_dir: std::path::PathBuf = if let Ok(m) = std::env::var("CARGO_MANIFEST_DIR") {
-                std::path::Path::new(&m).join("../bin")
-            } else {
-                match app.path().resource_dir() {
-                    Ok(rd) => rd,
-                    Err(_) => std::path::PathBuf::from("bin"),
-                }
+            // 注入 ffmpeg 搜索目录（作为 `media` 模块回溯的起点之一）。
+            // `media` 会从该目录逐级向上回溯寻找 `bin/ffmpeg.exe`，
+            // 因此这里传当前工作目录或 resource_dir 均可覆盖 dev / 打包场景。
+            let ffmpeg_dir: std::path::PathBuf = match app.path().resource_dir() {
+                Ok(rd) => rd,
+                Err(_) => std::path::PathBuf::from("."),
             };
+            println!(
+                "[setup] 计算 ffmpeg_dir = {} （存在: {}）",
+                ffmpeg_dir.display(),
+                ffmpeg_dir.exists()
+            );
             crate::biliapi::media::set_ffmpeg_dir(Some(&ffmpeg_dir));
             Ok(())
         })

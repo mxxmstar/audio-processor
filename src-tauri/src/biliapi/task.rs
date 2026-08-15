@@ -159,6 +159,10 @@ pub async fn run_task(
                 .map_err(|e| BiliApiError::Other(format!("视频下载失败: {}", e)))?;
         }
         DownloadMode::Merge => {
+            println!(
+                "[task] 进入 Merge 分支，task.video_url={:?}, task.audio_url={:?}",
+                task.video_url, task.audio_url
+            );
             let video = match &task.video_url {
                 Some(u) => u,
                 None => {
@@ -177,6 +181,7 @@ pub async fn run_task(
                 })?;
             if !media::ffmpeg_available() {
                 // 回退：仅下载音 + 视频，提示用户手动合并
+                println!("[task] ffmpeg 不可用 -> 走回退分支（分别下载音/视频）");
                 let vout = dir.join(format!("{}.video.mp4", base));
                 let aout = dir.join(format!("{}.audio.m4a", base));
                 client
@@ -194,6 +199,7 @@ pub async fn run_task(
             let vtmp = dir.join(format!("{}.video.mp4", base));
             let atmp = dir.join(format!("{}.audio.m4a", base));
             let out = dir.join(format!("{}.mp4", base));
+            println!("[task] ffmpeg 可用 -> 准备合并，输出: {}", out.display());
             client
                 .download_to_file(video, vtmp.to_str().unwrap(), prog_cb.clone())
                 .await
