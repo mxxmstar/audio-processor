@@ -21,8 +21,12 @@ src-tauri/icon-src.png
 # Keep test sample
 !*.mp3
 
-# 保留运行时资源（fpcalc.exe 必须随附）
+# 运行时资源：保留 bin/ 目录与 fpcalc.exe，忽略 ffmpeg（体积大，由用户自行放置）
 !bin/
+bin/fpcalc.exe
+bin/ffmpeg.exe
+bin/ffmpeg
+bin/ffmpeg-*
 bilidown/
 bilidownload/
 
