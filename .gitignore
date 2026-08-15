@@ -23,4 +23,5 @@ src-tauri/icon-src.png
 
 # 保留运行时资源（fpcalc.exe 必须随附）
 !bin/
+bilidown/
 bilidownload/
