@@ -1,4 +1,4 @@
-use tauri_plugin_http::reqwest;
+use reqwest;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

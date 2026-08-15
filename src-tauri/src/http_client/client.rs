@@ -1,5 +1,3 @@
-use crate::log_info;
-
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,7 +12,7 @@ use super::types::{CallbackInfo, HttpMethod, RequestConfig, HttpResponse};
 ///
 /// # 示例
 /// ```ignore
-/// use crate::httpclient::HttpClient;
+/// use crate::http_client::HttpClient;
 ///
 /// let client = HttpClient::new();
 /// let resp = client.get("https://api.example.com/users").await?;
@@ -188,11 +186,11 @@ impl HttpClient {
         }
 
         // 5. 发送请求
-        log_info!("HTTP {} -> {}", config.method.as_str(), url_str);
+        println!("HTTP {} -> {}", config.method.as_str(), url_str);
 
         let response = req.send().await.map_err(|e| {
             let err = HttpClientError::from(e);
-            log_info!("HTTP 请求失败: {}", err);
+            println!("HTTP 请求失败: {}", err);
             err
         })?;
 
@@ -227,7 +225,7 @@ impl HttpClient {
         };
 
         // 10. 记录日志
-        log_info!(
+        println!(
             "HTTP {} {} -> {} ({}ms, {} bytes)",
             config.method.as_str(),
             url_str,
