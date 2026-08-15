@@ -12,8 +12,8 @@ use crate::biliapi::error::BiliApiError;
 use crate::biliapi::video::{PageStream, ResolveResult};
 use crate::http_client::client::HttpClient;
 use crate::http_client::types::Progress as DlProgress;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
 /// 下载模式
@@ -102,20 +102,60 @@ fn sanitize(name: &str) -> String {
     s.trim().to_string()
 }
 
-/// 检查 ffmpeg 是否可用（在 PATH 或指定路径）
-pub fn ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// ffmpeg 搜索目录（可由 Tauri 层在启动时注入 `resource_dir/bin`）。
+/// `None` 表示未注入，仅探测 PATH 与开发期 `bin/`。
+static FFMPEG_DIR: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
+
+/// 设置 ffmpeg 搜索目录（Tauri 启动时调用，传入 `resource_dir/bin`）。
+/// 传 `None` 恢复为仅探测 PATH / 开发期 `bin/`。
+pub fn set_ffmpeg_dir(dir: Option<&Path>) {
+    *FFMPEG_DIR.lock().unwrap() = Some(dir.map(|p| p.to_path_buf()));
 }
 
-/// 用 ffmpeg 合并音视频为 mp4
+/// 返回 ffmpeg 候选路径列表（按优先级）：
+/// 1. PATH 中的 `ffmpeg`
+/// 2. 注入的搜索目录（打包后 `resource_dir/bin`）
+/// 3. 开发期 `CARGO_MANIFEST_DIR/../bin`（编译时常量）
+fn ffmpeg_candidates() -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from("ffmpeg")];
+    if let Some(Some(d)) = FFMPEG_DIR.lock().unwrap().clone() {
+        v.push(d.join("ffmpeg.exe"));
+        v.push(d.join("ffmpeg"));
+    }
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        v.push(PathBuf::from(manifest).join("../bin/ffmpeg.exe"));
+    }
+    v
+}
+
+/// 检查 ffmpeg 是否可用（PATH 或注入/开发期 `bin/ffmpeg`）
+pub fn ffmpeg_available() -> bool {
+    ffmpeg_candidates().iter().any(|p| {
+        std::process::Command::new(p)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+/// 用 ffmpeg 合并音视频为 mp4（自动选取可用路径）
 fn merge_with_ffmpeg(video: &str, audio: &str, output: &str) -> Result<(), BiliApiError> {
-    let status = std::process::Command::new("ffmpeg")
+    let bin = ffmpeg_candidates()
+        .into_iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("-version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| BiliApiError::Other("未找到可用的 ffmpeg".into()))?;
+    let status = std::process::Command::new(bin)
         .args(["-y", "-i", video, "-i", audio, "-c", "copy", output])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

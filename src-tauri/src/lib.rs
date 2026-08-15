@@ -19,6 +19,18 @@ pub fn run() {
             if let Ok(dir) = app.path().app_config_dir() {
                 app.state::<BiliState>().init_config_dir(dir);
             }
+            // 注入 ffmpeg 搜索目录（打包后取 resource_dir/bin；开发期回退 CARGO_MANIFEST_DIR/../bin）
+            let ffmpeg_dir = match app.path().resource_dir() {
+                Ok(rd) => rd.join("bin"),
+                Err(_) => {
+                    if let Ok(m) = std::env::var("CARGO_MANIFEST_DIR") {
+                        std::path::Path::new(&m).join("../bin")
+                    } else {
+                        std::path::PathBuf::from("bin")
+                    }
+                }
+            };
+            crate::biliapi::task::set_ffmpeg_dir(Some(&ffmpeg_dir));
             Ok(())
         })
         // 注册命令，使前端可通过 invoke 调用
