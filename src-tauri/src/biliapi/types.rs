@@ -20,6 +20,38 @@ impl MediaFormat {
     pub const Q_DOLBY: MediaFormat = MediaFormat(126);
     pub const Q_HDR: MediaFormat = MediaFormat(125);
     pub const Q_8K: MediaFormat = MediaFormat(127);
+
+    /// 清晰度降级链（由高到低）。
+    /// 当目标清晰度无可用流时，按此顺序回退，尽量保留最高可用画质。
+    pub fn fallback_chain(&self) -> Vec<MediaFormat> {
+        let ordered = [
+            MediaFormat::Q_8K,
+            MediaFormat::Q_4K,
+            MediaFormat::Q_DOLBY,
+            MediaFormat::Q_HDR,
+            MediaFormat::Q_1080P_PLUS,
+            MediaFormat::Q_1080P,
+            MediaFormat::Q_720P,
+            MediaFormat::Q_360P,
+        ];
+        // 以 self 为起点，取其及之后的所有更低清晰度
+        let start = ordered
+            .iter()
+            .position(|f| f.0 == self.0)
+            .unwrap_or(0);
+        ordered[start..].to_vec()
+    }
+}
+
+/// 视频编码 Codecid 含义（对齐 B 站 DASH 协议）。
+/// 与 `stream::codecid` 同源，这里在 types 层也导出一份便于业务代码引用。
+pub mod codecid {
+    /// AV1
+    pub const AV1: i64 = 12;
+    /// H.264 / AVC
+    pub const H264: i64 = 7;
+    /// HEVC / H.265
+    pub const HEVC: i64 = 13;
 }
 
 /// B 站统一响应外壳：`code` + `message/msg` + `data`
@@ -331,5 +363,24 @@ mod tests {
         assert_eq!(QR_SUCCESS, 0);
         assert_eq!(QR_NO_SCAN, 86101);
         assert_eq!(QR_EXPIRES, 86038);
+    }
+
+    #[test]
+    fn test_fallback_chain_starts_at_preferred() {
+        // 期望 1080P+，降级链应从它开始，包含更低清晰度，不含更高
+        let chain = MediaFormat::Q_1080P_PLUS.fallback_chain();
+        assert_eq!(chain.first().unwrap().0, MediaFormat::Q_1080P_PLUS.0);
+        assert!(chain.contains(&MediaFormat::Q_1080P));
+        assert!(chain.contains(&MediaFormat::Q_720P));
+        assert!(chain.contains(&MediaFormat::Q_360P));
+        assert!(!chain.contains(&MediaFormat::Q_4K));
+        assert!(!chain.contains(&MediaFormat::Q_8K));
+    }
+
+    #[test]
+    fn test_fallback_chain_lowest_is_singleton() {
+        let chain = MediaFormat::Q_360P.fallback_chain();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, 16);
     }
 }
