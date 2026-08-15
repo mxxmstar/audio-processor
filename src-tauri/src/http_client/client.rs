@@ -311,7 +311,7 @@ impl HttpClient {
         &self,
         url: &str,
         path: &str,
-        on_progress: Option<&dyn Fn(Progress)>,
+        on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
     ) -> Result<(), HttpClientError> {
         self.download_with_config(
             RequestConfig::new(url).header("Referer", "https://www.bilibili.com"),
@@ -326,7 +326,7 @@ impl HttpClient {
         &self,
         config: RequestConfig,
         path: &str,
-        on_progress: Option<&dyn Fn(Progress)>,
+        on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
     ) -> Result<(), HttpClientError> {
         use futures_util::StreamExt;
         use tokio::io::AsyncWriteExt;
@@ -393,7 +393,7 @@ impl HttpClient {
 
             // 节流上报：约 200ms 一次
             let now = Instant::now();
-            if let Some(cb) = on_progress {
+            if let Some(ref cb) = on_progress {
                 let elapsed = now.duration_since(last_report).as_millis() as u64;
                 if elapsed >= 200 {
                     let speed = if elapsed > 0 {
@@ -420,7 +420,7 @@ impl HttpClient {
             .await
             .map_err(|e| HttpClientError::OtherError(format!("flush 失败: {}", e)))?;
 
-        if let Some(cb) = on_progress {
+        if let Some(ref cb) = on_progress {
             cb(Progress {
                 downloaded,
                 total: Some(downloaded),
@@ -551,16 +551,17 @@ mod tests {
         let path = tmp.to_string_lossy().to_string();
 
         let client = HttpClient::new();
-        let calls = std::cell::Cell::new(0u32);
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls_ref = calls.clone();
         let result = client
-            .download_to_file(&url, &path, Some(&|p: Progress| {
+            .download_to_file(&url, &path, Some(Arc::new(move |p: Progress| {
                 if p.percent > 0.0 {
-                    calls.set(calls.get() + 1);
+                    calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            }))
+            })))
             .await;
         assert!(result.is_ok());
-        assert!(calls.get() >= 1, "进度回调应至少触发一次（结尾 100%）");
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 1, "进度回调应至少触发一次（结尾 100%）");
 
         let _ = std::fs::remove_file(&path);
     }

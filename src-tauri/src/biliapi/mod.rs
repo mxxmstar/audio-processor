@@ -8,6 +8,7 @@
 //! - `types`   - B 站响应/业务数据结构（对齐 Go 版 type.go）
 //! - `video`   - 视频/番剧/收藏夹/合集/热门 API
 //! - `stream`  - 音视频直链挑选（按 Codecid/清晰度优先级）
+//! - `task`    - 下载任务模型与编排（AudioOnly/VideoOnly/Merge + 并发）
 //! - `login`   - 扫码登录 / 登录态检查
 //! - `wbi_cache` - WBI mixinKey 拉取与 24h 内存缓存
 //! - `error`   - 错误类型
@@ -16,6 +17,7 @@ pub mod client;
 pub mod error;
 pub mod login;
 pub mod stream;
+pub mod task;
 pub mod types;
 pub mod video;
 pub mod wbi_cache;
