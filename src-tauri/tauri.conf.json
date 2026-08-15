@@ -38,7 +38,8 @@
       }
     },
     "resources": {
-      "../bin/fpcalc.exe": "fpcalc.exe"
+      "../bin/fpcalc.exe": "fpcalc.exe",
+      "../bin/ffmpeg.exe": "bin/ffmpeg.exe"
     }
   }
 }
