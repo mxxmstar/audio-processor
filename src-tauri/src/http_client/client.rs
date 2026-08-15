@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::error::HttpClientError;
-use super::types::{CallbackInfo, HttpMethod, RequestConfig, HttpResponse};
+use super::types::{CallbackInfo, HttpMethod, Progress, RequestConfig, HttpResponse};
 
 /// HTTP 客户端
 ///
@@ -149,17 +149,45 @@ impl HttpClient {
     /// 根据 `RequestConfig` 中的配置构造并发送请求。
     /// 此方法是所有公开请求方法的底层实现。
     ///
+    /// 内置重试：当 `config.retry > 0` 且发生**可重试错误**（超时 / 连接失败 / 服务端 5xx）
+    /// 时，按指数退避重试。客户端 4xx 业务错误不会重试。
+    ///
     /// # 参数
     /// * `config` - 请求配置，包含 URL、方法、请求头、查询参数和请求体等
-    ///
-    /// # 处理流程
-    /// 1. 解析 URL
-    /// 2. 构造请求（设置方法、请求头、查询参数、请求体、超时）
-    /// 3. 发送请求并等待响应
-    /// 4. 检查状态码，若非成功状态码则返回错误
-    /// 5. 读取响应体
-    /// 6. 封装响应并触发回调
     pub async fn send(&self, config: RequestConfig) -> Result<HttpResponse, HttpClientError> {
+        let max_retry = config.retry;
+        let mut attempt: u32 = 0;
+        loop {
+            match self.send_once(&config).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let retryable = matches!(
+                        e,
+                        HttpClientError::TimeoutError(_)
+                            | HttpClientError::RequestError(_)
+                            | HttpClientError::TlsError(_)
+                    ) || matches!(e, HttpClientError::HttpStatusError { status, .. } if status >= 500);
+                    if attempt < max_retry && retryable {
+                        attempt += 1;
+                        // 指数退避：2^attempt 秒（上限 30s）
+                        let backoff = std::time::Duration::from_secs(2u64.pow(attempt).min(30));
+                        println!(
+                            "HTTP 请求可重试失败 (第{}次)，{}s 后重试: {}",
+                            attempt,
+                            backoff.as_secs(),
+                            e
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// 单次发送（不含重试），供 `send` 调用
+    async fn send_once(&self, config: &RequestConfig) -> Result<HttpResponse, HttpClientError> {
         let start = Instant::now();
         let url_str = config.url.clone();
 
@@ -211,6 +239,12 @@ impl HttpClient {
             })
             .collect();
 
+        // 7.1 提取 Set-Cookie（供登录态提取 SESSDATA）
+        let cookies: Vec<(String, String)> = response
+            .cookies()
+            .map(|c| (c.name().to_string(), c.value().to_string()))
+            .collect();
+
         // 8. 读取响应体
         let body = response.text().await.map_err(|e| {
             HttpClientError::ResponseParseError(format!("读取响应体失败: {}", e))
@@ -224,6 +258,7 @@ impl HttpClient {
             status,
             headers,
             body: body.clone(),
+            cookies,
         };
 
         // 10. 记录日志
@@ -248,7 +283,153 @@ impl HttpClient {
             (callback)(info);
         }
 
+        if !http_response.is_success() {
+            return Err(HttpClientError::HttpStatusError {
+                status,
+                body: body.clone(),
+            });
+        }
+
         Ok(http_response)
+    }
+
+    /// 流式下载到本地文件（阶段 2）
+    ///
+    /// 使用 `reqwest` 的 chunked 流边下边写，避免将整个文件读入内存。
+    /// 通过 `on_progress` 回调（节流约 200ms）上报下载进度。
+    ///
+    /// # 参数
+    /// * `url` - 直链地址（B 站 DASH 流需带 `Referer`/`User-Agent`，见 `download_with_config`）
+    /// * `path` - 目标文件路径
+    /// * `on_progress` - 进度回调（可选）
+    ///
+    /// # 示例
+    /// ```ignore
+    /// client.download_to_file(&url, "video.m4s", None).await?;
+    /// ```
+    pub async fn download_to_file(
+        &self,
+        url: &str,
+        path: &str,
+        on_progress: Option<&dyn Fn(Progress)>,
+    ) -> Result<(), HttpClientError> {
+        self.download_with_config(
+            RequestConfig::new(url).header("Referer", "https://www.bilibili.com"),
+            path,
+            on_progress,
+        )
+        .await
+    }
+
+    /// 带自定义请求配置的流式下载（可附加 header / 重试 / Range 断点续传）
+    pub async fn download_with_config(
+        &self,
+        config: RequestConfig,
+        path: &str,
+        on_progress: Option<&dyn Fn(Progress)>,
+    ) -> Result<(), HttpClientError> {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        // 若文件已存在，支持 Range 断点续传（从已下载字节之后开始）
+        let resume_from = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(resume_from == 0)
+            .open(path)
+            .await
+            .map_err(|e| HttpClientError::OtherError(format!("打开文件失败 {}: {}", path, e)))?;
+        if resume_from > 0 {
+            use tokio::io::AsyncSeekExt;
+            file.seek(std::io::SeekFrom::Start(resume_from))
+                .await
+                .map_err(|e| HttpClientError::OtherError(format!("seek 失败: {}", e)))?;
+        }
+
+        let mut req = self
+            .inner
+            .request(convert_method(&config.method), &config.url)
+            .timeout(std::time::Duration::from_secs(config.timeout_secs));
+        for (k, v) in &config.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        if !config.query.is_empty() {
+            req = req.query(&config.query);
+        }
+        if resume_from > 0 {
+            req = req.header("Range", format!("bytes={}-", resume_from));
+        }
+
+        let resp = req.send().await.map_err(HttpClientError::from)?;
+        let status = resp.status().as_u16();
+        // 206 Partial Content 或 200 均视为有效
+        if status != 200 && status != 206 {
+            return Err(HttpClientError::HttpStatusError {
+                status,
+                body: format!("下载失败，状态码 {}", status),
+            });
+        }
+        let total: Option<u64> = resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|len| len + resume_from);
+
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = resume_from;
+        let mut last_report = Instant::now();
+        let mut last_downloaded: u64 = resume_from;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                HttpClientError::ResponseParseError(format!("流读取失败: {}", e))
+            })?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| HttpClientError::OtherError(format!("写入文件失败: {}", e)))?;
+            downloaded += chunk.len() as u64;
+
+            // 节流上报：约 200ms 一次
+            let now = Instant::now();
+            if let Some(cb) = on_progress {
+                let elapsed = now.duration_since(last_report).as_millis() as u64;
+                if elapsed >= 200 {
+                    let speed = if elapsed > 0 {
+                        ((downloaded - last_downloaded) as f64 / elapsed as f64 * 1000.0) as u64
+                    } else {
+                        0
+                    };
+                    let percent = match total {
+                        Some(t) if t > 0 => (downloaded as f64 / t as f64 * 100.0).min(100.0),
+                        _ => 0.0,
+                    };
+                    cb(Progress {
+                        downloaded,
+                        total,
+                        speed,
+                        percent,
+                    });
+                    last_report = now;
+                    last_downloaded = downloaded;
+                }
+            }
+        }
+        file.flush()
+            .await
+            .map_err(|e| HttpClientError::OtherError(format!("flush 失败: {}", e)))?;
+
+        if let Some(cb) = on_progress {
+            cb(Progress {
+                downloaded,
+                total: Some(downloaded),
+                speed: 0,
+                percent: 100.0,
+            });
+        }
+        println!("下载完成: {} -> {} ({} bytes)", config.url, path, downloaded);
+        Ok(())
     }
 
     /// 发送请求并断言成功（200-299）
@@ -299,11 +480,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_config() {
         let client = HttpClient::new();
-        
+
         let url = "http://192.168.66.83:8080/config";
         println!("\n========== 发送 getConfig 请求 ==========");
         println!("请求地址: {}", url);
-        
+
         match client.get(url).await {
             Ok(response) => {
                 println!("\n========== 请求成功 ==========");
@@ -322,5 +503,65 @@ mod tests {
                 println!("\n======================================\n");
             }
         }
+    }
+
+    /// 启动一个本地 TCP server，返回指定大小的固定内容，用于测试流式下载。
+    async fn spawn_file_server(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock.read(&mut [0u8; 1024]).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn test_download_to_file_writes_content() {
+        let payload: Vec<u8> = (0u8..=255).cycle().take(20_000).collect();
+        let url = spawn_file_server(payload.clone()).await;
+        let tmp = std::env::temp_dir().join(format!("httpclient_test_{}.bin", std::process::id()));
+        let path = tmp.to_string_lossy().to_string();
+
+        let client = HttpClient::new();
+        let result = client.download_to_file(&url, &path, None).await;
+        assert!(result.is_ok(), "下载应成功: {:?}", result.err());
+
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written.len(), payload.len());
+        assert_eq!(written, payload);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_download_to_file_progress_called() {
+        let payload: Vec<u8> = vec![7u8; 50_000];
+        let url = spawn_file_server(payload.clone()).await;
+        let tmp = std::env::temp_dir().join(format!("httpclient_test2_{}.bin", std::process::id()));
+        let path = tmp.to_string_lossy().to_string();
+
+        let client = HttpClient::new();
+        let calls = std::cell::Cell::new(0u32);
+        let result = client
+            .download_to_file(&url, &path, Some(&|p: Progress| {
+                if p.percent > 0.0 {
+                    calls.set(calls.get() + 1);
+                }
+            }))
+            .await;
+        assert!(result.is_ok());
+        assert!(calls.get() >= 1, "进度回调应至少触发一次（结尾 100%）");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

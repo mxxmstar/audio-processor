@@ -55,6 +55,8 @@ pub struct RequestConfig {
     pub body: Option<serde_json::Value>,
     /// 超时时间（秒）
     pub timeout_secs: u64,
+    /// 失败重试次数（0 = 不重试）。仅对可重试错误生效（超时/连接/5xx）
+    pub retry: u32,
 }
 
 impl RequestConfig {
@@ -70,6 +72,7 @@ impl RequestConfig {
             query: HashMap::new(),
             body: None,
             timeout_secs: 30,
+            retry: 0,
         }
     }
 
@@ -106,6 +109,15 @@ impl RequestConfig {
     /// 设置超时时间（秒）
     pub fn timeout_secs(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    /// 设置失败重试次数（0 = 不重试）
+    ///
+    /// 仅对可重试错误生效：超时、连接失败、服务端 5xx。
+    /// 客户端 4xx 业务错误不会重试。
+    pub fn retry(mut self, times: u32) -> Self {
+        self.retry = times;
         self
     }
 
@@ -148,6 +160,8 @@ pub struct HttpResponse {
     pub headers: HashMap<String, String>,
     /// 响应体（原始文本）
     pub body: String,
+    /// 响应设置的 Cookie（(name, value) 列表，用于提取 SESSDATA 等）
+    pub cookies: Vec<(String, String)>,
 }
 
 impl HttpResponse {
@@ -200,5 +214,20 @@ pub struct CallbackInfo {
     pub duration_ms: u64,
     /// 响应体大小（字节）
     pub body_size: usize,
+}
+
+/// 下载进度信息
+///
+/// 由流式下载方法按固定间隔回调，供上层展示进度条 / 速率。
+#[derive(Debug, Clone)]
+pub struct Progress {
+    /// 已下载字节数
+    pub downloaded: u64,
+    /// 总字节数（来自 `Content-Length`，未知时为 `None`）
+    pub total: Option<u64>,
+    /// 瞬时速率（字节/秒，粗略值）
+    pub speed: u64,
+    /// 完成百分比（0.0 ~ 100.0）；`total` 未知时为 0.0
+    pub percent: f64,
 }
 
