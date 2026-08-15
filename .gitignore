@@ -31,3 +31,9 @@ src-tauri/auth.json
 src-tauri/wbi_cache.json
 auth.json
 wbi_cache.json
+
+# 下载临时产物（音视频分别下载 / 合并中间文件）
+*.audio.m4a
+*.video.mp4
+*.audio.tmp
+*.video.tmp
