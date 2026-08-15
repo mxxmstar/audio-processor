@@ -308,6 +308,12 @@ pub async fn bili_start_download(
         }));
 
     let mut tasks_ref = tasks.clone();
+    // 若下载命令显式指定了目录，覆盖各任务的输出目录（优先于解析时设定的值）
+    if let Some(dir) = input.output_dir.clone().filter(|d| !d.is_empty()) {
+        for t in tasks_ref.iter_mut() {
+            t.output_dir = dir.clone();
+        }
+    }
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         let results = crate::biliapi::task::run_batch(client, &mut tasks_ref, concurrency, prog_cb).await;

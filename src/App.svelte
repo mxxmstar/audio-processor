@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+  import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
 
   type TaskStatus = 'Pending' | 'Downloading' | 'Completed' | 'Failed';
@@ -64,6 +65,21 @@
     const u = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(n) / Math.log(1024));
     return (n / Math.pow(1024, i)).toFixed(2) + ' ' + u[i];
+  }
+
+  async function pickDir() {
+    try {
+      const sel = await open({
+        directory: true,
+        multiple: false,
+        title: '选择下载目录',
+      });
+      if (typeof sel === 'string') {
+        outputDir = sel;
+      }
+    } catch (e) {
+      message = '选择目录失败：' + String(e);
+    }
   }
 
   async function refreshLogin() {
@@ -222,7 +238,10 @@
         <option>4K</option>
         <option>8K</option>
       </select>
-      <input placeholder="输出目录（可选）" bind:value={outputDir} />
+      <button onclick={pickDir}>选择目录</button>
+      <span class="dir" title={outputDir}>
+        {outputDir || '默认：应用配置目录'}
+      </span>
       <button onclick={doResolve} disabled={resolving}>
         {resolving ? '解析中…' : '解析'}
       </button>
