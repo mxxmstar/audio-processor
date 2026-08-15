@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 /// 下载模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DownloadMode {
     /// 仅音频
     AudioOnly,
@@ -28,7 +28,7 @@ pub enum DownloadMode {
 }
 
 /// 任务状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DownloadStatus {
     Pending,
     Downloading,
@@ -37,7 +37,7 @@ pub enum DownloadStatus {
 }
 
 /// 单个下载任务
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DownloadTask {
     /// 任务 ID
     pub id: String,

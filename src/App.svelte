@@ -1,142 +1,337 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { onMount } from 'svelte';
 
-  // Svelte 5 响应式状态：使用 $state 让变量变化能触发界面更新
-  interface SongInfo {
+  type TaskStatus = 'Pending' | 'Downloading' | 'Completed' | 'Failed';
+
+  interface Task {
+    id: string;
     title: string;
-    artist: string;
-    album: string | null;
-    album_date: string | null;
-    confidence: number;
+    bvid: string;
+    page: number;
+    part: string;
+    mode: string;
+    out_path: string;
+    status: TaskStatus;
+    error: string | null;
   }
 
-  // 识别结果（null 表示尚未识别/已清空）
-  let info = $state<SongInfo | null>(null);
-  // 错误提示（null 表示无错误）
-  let errorMsg = $state<string | null>(null);
-  // 是否正在识别（用于禁用按钮并显示“识别中…”）
-  let loading = $state(false);
-
-  // 点击按钮：打开文件选择框并识别
-  async function pickAndIdentify() {
-    try {
-      // 调用 Tauri 对话框插件打开系统文件选择器
-      const selected = await open({
-        multiple: false, // 单选
-        filters: [
-          {
-            name: "音频文件",
-            extensions: ["mp3", "flac", "wav", "m4a", "aac"],
-          },
-        ],
-      });
-      // 用户取消或未选择文件时直接返回
-      if (!selected || Array.isArray(selected)) return;
-      await runIdentify(selected as string);
-    } catch (e) {
-      // 文件对话框调用失败（如插件未注册/权限不足）时给出明确提示
-      errorMsg = "打开文件对话框失败：" + String(e);
-    }
+  interface ProgressEvent {
+    task_id: string;
+    title: string;
+    status: string;
+    percent: number;
+    downloaded: number;
+    total: number;
+    speed: number;
+    error: string | null;
   }
 
-  // 调用 Rust 端 identify 命令识别音频
-  async function runIdentify(path: string) {
-    loading = true;
-    errorMsg = null;
-    info = null;
+  interface LoginQr {
+    qr_url: string;
+    qr_key: string;
+  }
+
+  interface LoginState {
+    authed: boolean;
+    message: string;
+  }
+
+  // ---- 状态 ----
+  let loggedIn = $state(false);
+  let checkingLogin = $state(true);
+
+  let inputUrl = $state('');
+  let preferFormat = $state('1080P');
+  let mode = $state('audio'); // audio | video | merge
+  let outputDir = $state('');
+
+  let tasks = $state<Task[]>([]);
+  let resolving = $state(false);
+  let downloading = $state(false);
+  let message = $state('');
+
+  // 登录二维码弹窗
+  let showQr = $state(false);
+  let qr = $state<LoginQr | null>(null);
+  let qrPolling = $state<number | null>(null);
+
+  const progressMap = $state<Record<string, ProgressEvent>>({});
+
+  function fmtBytes(n: number): string {
+    if (!n) return '0 B';
+    const u = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(n) / Math.log(1024));
+    return (n / Math.pow(1024, i)).toFixed(2) + ' ' + u[i];
+  }
+
+  async function refreshLogin() {
+    checkingLogin = true;
     try {
-      // invoke 通过 Tauri IPC 调用后端命令
-      info = await invoke<SongInfo>("identify", { path });
-    } catch (e) {
-      errorMsg = String(e);
+      loggedIn = await invoke<boolean>('bili_check_login');
+    } catch {
+      loggedIn = false;
     } finally {
-      loading = false;
+      checkingLogin = false;
     }
   }
+
+  async function doResolve() {
+    if (!loggedIn) {
+      message = '请先扫码登录';
+      return;
+    }
+    if (!inputUrl.trim()) {
+      message = '请输入 BV 号或链接';
+      return;
+    }
+    resolving = true;
+    message = '';
+    try {
+      tasks = await invoke<Task[]>('bili_resolve', {
+        input: {
+          input: inputUrl.trim(),
+          mode,
+          preferFormat,
+          outputDir: outputDir || null,
+        },
+      });
+    } catch (e) {
+      message = String(e);
+      tasks = [];
+    } finally {
+      resolving = false;
+    }
+  }
+
+  async function doDownload() {
+    if (tasks.length === 0) return;
+    downloading = true;
+    message = '开始下载…';
+    try {
+      await invoke<string[]>('bili_start_download', {
+        input: { outputDir: outputDir || null, concurrency: 3 },
+      });
+    } catch (e) {
+      message = String(e);
+      downloading = false;
+    }
+  }
+
+  async function doLogout() {
+    await invoke('bili_logout');
+    loggedIn = false;
+    tasks = [];
+  }
+
+  async function openQr() {
+    showQr = true;
+    try {
+      qr = await invoke<LoginQr>('bili_login_qr');
+      startPoll();
+    } catch (e) {
+      message = '生成二维码失败：' + String(e);
+    }
+  }
+
+  function startPoll() {
+    stopPoll();
+    qrPolling = setInterval(async () => {
+      if (!qr) return;
+      try {
+        const r = await invoke<LoginState>('bili_login_poll', { qrKey: qr.qr_key });
+        if (r.authed) {
+          loggedIn = true;
+          showQr = false;
+          stopPoll();
+          qr = null;
+          message = '登录成功';
+        }
+      } catch {
+        /* 继续轮询 */
+      }
+    }, 2000) as unknown as number;
+  }
+
+  function stopPoll() {
+    if (qrPolling !== null) {
+      clearInterval(qrPolling);
+      qrPolling = null;
+    }
+  }
+
+  onMount(() => {
+    refreshLogin();
+    const off1 = listen<ProgressEvent>('download-progress', (e) => {
+      progressMap[e.payload.task_id] = e.payload;
+    });
+    const off2 = listen<{ ok: boolean; failed: number }>('download-finished', (e) => {
+      downloading = false;
+      message = e.payload.ok ? '全部下载完成' : `下载结束，${e.payload.failed} 个失败`;
+      // 刷新任务状态
+      invoke<Task[]>('bili_list_tasks')
+        .then((t) => (tasks = t))
+        .catch(() => {});
+    });
+    return async () => {
+      stopPoll();
+      (await off1)();
+      (await off2)();
+    };
+  });
 </script>
 
 <main>
-  <h1>音频指纹识别</h1>
-  <p class="sub">选择本地音频文件，识别曲目信息（基于 AcoustID + MusicBrainz）</p>
+  <h1>B音频处理 / B站下载器</h1>
 
-  <button onclick={pickAndIdentify} disabled={loading}>
-    {loading ? "识别中…" : "选择音频文件"}
-  </button>
+  {#if checkingLogin}
+    <p>检查登录态…</p>
+  {:else if !loggedIn}
+    <button onclick={openQr}>扫码登录</button>
+    {#if message}<p class="msg">{message}</p>{/if}
+  {:else}
+    <div class="bar">
+      <span class="ok">已登录</span>
+      <button onclick={doLogout}>登出</button>
+    </div>
+  {/if}
 
-  {#if errorMsg}
-    <div class="card error">
-      <strong>识别失败</strong>
-      <p>{errorMsg}</p>
+  {#if showQr && qr}
+    <div class="qr">
+      <p>使用 B站 APP 扫码登录</p>
+      <img src={qr.qr_url} alt="qr" width="240" height="240" />
     </div>
-  {:else if info}
-    <div class="card">
-      <div class="row"><span class="label">标题</span><span>{info.title}</span></div>
-      <div class="row"><span class="label">艺术家</span><span>{info.artist}</span></div>
-      {#if info.album}
-        <div class="row">
-          <span class="label">专辑</span>
-          <span>{info.album}{info.album_date ? ` (${info.album_date})` : ""}</span>
-        </div>
-      {/if}
-      <div class="row">
-        <span class="label">置信度</span>
-        <span>{info.confidence.toFixed(1)}%</span>
-      </div>
-    </div>
+  {/if}
+
+  {#if loggedIn}
+    <section class="input">
+      <input
+        placeholder="BV 号 / 链接 / av 号 / 合集(ss) / 番剧"
+        bind:value={inputUrl}
+      />
+      <select bind:value={mode}>
+        <option value="audio">仅音频</option>
+        <option value="video">仅视频</option>
+        <option value="merge">音视频合并</option>
+      </select>
+      <select bind:value={preferFormat}>
+        <option>360P</option>
+        <option>720P</option>
+        <option>1080P</option>
+        <option>4K</option>
+        <option>8K</option>
+      </select>
+      <input placeholder="输出目录（可选）" bind:value={outputDir} />
+      <button onclick={doResolve} disabled={resolving}>
+        {resolving ? '解析中…' : '解析'}
+      </button>
+      <button onclick={doDownload} disabled={downloading || tasks.length === 0}>
+        {downloading ? '下载中…' : '开始下载'}
+      </button>
+    </section>
+
+    {#if message}<p class="msg">{message}</p>{/if}
+
+    {#if tasks.length}
+      <ul class="tasks">
+        {#each tasks as t (t.id)}
+          {@const pg = progressMap[t.id]}
+          <li>
+            <div class="t-title">{t.title}{t.part ? ' - ' + t.part : ''}</div>
+            <div class="t-meta">
+              {t.mode} · {t.status}
+              {#if pg}
+                · {fmtBytes(pg.downloaded)}{pg.total ? ' / ' + fmtBytes(pg.total) : ''}
+                · {fmtBytes(pg.speed)}/s
+              {/if}
+              {#if t.error}<span class="err"> · {t.error}</span>{/if}
+            </div>
+            <div class="progress">
+              <div
+                class="fill"
+                style="width: {pg ? Math.round(pg.percent * 100) : (t.status === 'Completed' ? 100 : 0)}%"
+              ></div>
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   {/if}
 </main>
 
 <style>
   main {
-    max-width: 560px;
-    margin: 0 auto;
-    padding: 32px 24px;
+    max-width: 720px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    font-family: system-ui, sans-serif;
   }
   h1 {
-    margin: 0 0 4px;
-    font-size: 24px;
+    font-size: 1.4rem;
   }
-  .sub {
-    margin: 0 0 24px;
-    color: #6b7280;
-    font-size: 14px;
+  .bar {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .ok {
+    color: #1a7f37;
+    font-weight: 600;
+  }
+  .input {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1rem 0;
+  }
+  .input input,
+  .input select {
+    padding: 0.4rem;
+  }
+  .input input:first-child {
+    flex: 1 1 240px;
   }
   button {
-    background: #2563eb;
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 10px 18px;
-    font-size: 15px;
+    padding: 0.4rem 0.8rem;
     cursor: pointer;
   }
-  button:disabled {
-    background: #9ca3af;
-    cursor: default;
+  .msg {
+    color: #b35900;
   }
-  .card {
-    margin-top: 24px;
-    background: #fff;
-    border-radius: 10px;
-    padding: 18px 20px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  .qr {
+    margin: 1rem 0;
   }
-  .card.error {
-    border: 1px solid #fca5a5;
-    color: #b91c1c;
+  .tasks {
+    list-style: none;
+    padding: 0;
   }
-  .row {
-    display: flex;
-    padding: 6px 0;
-    border-bottom: 1px solid #f1f3f5;
+  .tasks li {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 0.6rem;
+    margin-bottom: 0.6rem;
   }
-  .row:last-child {
-    border-bottom: none;
+  .t-title {
+    font-weight: 600;
   }
-  .label {
-    width: 80px;
-    color: #6b7280;
-    flex-shrink: 0;
+  .t-meta {
+    font-size: 0.8rem;
+    color: #555;
+    margin: 0.3rem 0;
+  }
+  .err {
+    color: #c00;
+  }
+  .progress {
+    height: 8px;
+    background: #eee;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: #1a7f37;
+    transition: width 0.2s;
   }
 </style>

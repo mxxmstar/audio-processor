@@ -3,6 +3,9 @@ use tauri::Manager;
 
 use crate::recognizer::{run_identify, SongInfo};
 
+/// 阶段 5：B 站下载相关 Tauri 命令
+pub mod bili;
+
 /// Tauri 命令：供前端通过 `invoke('identify', { path })` 调用。
 /// 接收音频文件绝对路径，返回识别结果或错误信息字符串。
 ///
