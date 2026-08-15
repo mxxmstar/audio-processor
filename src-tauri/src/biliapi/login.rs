@@ -54,10 +54,12 @@ pub async fn get_qr_status(qr_key: &str) -> Result<(types::QrStatus, Option<Stri
     let status = base.into_result()?;
 
     let sessdata = if status.code == types::QR_SUCCESS {
-        // 从响应头 Set-Cookie 提取 SESSDATA（对齐 Go 版 GetCookieValue）
-        resp.headers
-            .get("set-cookie")
-            .and_then(|v| extract_sessdata(v))
+        // 从响应 Cookie（多值）提取 SESSDATA。
+        // 注意：单值 `headers["set-cookie"]` 会丢失多值，必须用 `cookies` 列表。
+        resp.cookies
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("SESSDATA"))
+            .map(|(_, v)| v.clone())
     } else {
         None
     };
@@ -76,20 +78,6 @@ pub fn persist_login(dir: Option<&Path>, sessdata: Option<&str>) {
         }
         _ => {}
     }
-}
-
-/// 从 Set-Cookie 头值中提取 SESSDATA
-/// 头可能包含多个 cookie，形如 `SESSDATA=xxx; Expires=...`
-fn extract_sessdata(header: &str) -> Option<String> {
-    for part in header.split(';') {
-        let part = part.trim();
-        if let Some(rest) = part.strip_prefix("SESSDATA=") {
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// 检查指定 SESSDATA 是否有效（对应 `x/space/myinfo`）。
