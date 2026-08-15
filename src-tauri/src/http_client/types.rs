@@ -108,6 +108,32 @@ impl RequestConfig {
         self.timeout_secs = secs;
         self
     }
+
+    /// 对当前已有的查询参数追加 WBI 签名（B 站接口防爬校验）
+    ///
+    /// 自动加入 `wts`（时间戳）与 `w_rid`（签名值），并将它们合并进 `self.query`。
+    /// 调用前请先用 [`crate::http_client::wbi::mixin_key_from_nav`] 获取 `mixin_key`。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let config = RequestConfig::new("https://api.bilibili.com/x/player/playurl")
+    ///     .query("bvid", bvid)
+    ///     .query("cid", cid)
+    ///     .wbi_sign(&mixin_key);
+    /// ```
+    pub fn wbi_sign(mut self, mixin_key: &str) -> Self {
+        // 收集当前 query 为 (&str, &str) 切片
+        let params: Vec<(&str, &str)> = self
+            .query
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let signed = crate::http_client::wbi::sign(&params, mixin_key);
+        for (k, v) in signed {
+            self.query.insert(k, v);
+        }
+        self
+    }
 }
 
 /// HTTP 响应封装

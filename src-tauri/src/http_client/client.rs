@@ -1,6 +1,6 @@
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::error::HttpClientError;
 use super::types::{CallbackInfo, HttpMethod, RequestConfig, HttpResponse};
@@ -36,7 +36,9 @@ impl HttpClient {
     /// - 默认超时 30 秒
     pub fn new() -> Self {
         let inner = ReqwestClient::builder()
-            .user_agent("HttpClient/1.0")
+            .user_agent("Mozilla/5.0") // 默认 UA，B 站 API 要求（可被 header() 覆盖）
+            .no_proxy() // 强制直连，避免 HTTP_PROXY 等环境变量导致走代理
+            .timeout(Duration::from_secs(30))
             .build()
             .expect("创建 HTTP 客户端失败");
 
