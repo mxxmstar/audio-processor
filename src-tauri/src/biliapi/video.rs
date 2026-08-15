@@ -54,6 +54,27 @@ pub async fn get_play_info(
     client.send_json::<types::PlayInfo>(cfg).await
 }
 
+/// 从播放信息中挑选音视频直链
+///
+/// 封装 `get_play_info` + `stream::select_streams`：`format` 为目标视频清晰度，
+/// 音频按 FLAC 优先 / 否则最高码率自动挑选。返回 `None` 视频直链表示目标清晰度不可用，
+/// 调用方可降低 `format` 后重试 `select_video_url`。
+pub async fn get_streams(
+    client: &BiliClient,
+    bvid: &str,
+    cid: i64,
+    format: i64,
+) -> Result<crate::biliapi::stream::StreamSelection> {
+    let play = get_play_info(client, bvid, cid, format).await?;
+    let dash = play.dash.ok_or_else(|| {
+        crate::biliapi::error::BiliApiError::Other("播放信息缺少 DASH 流（可能无权限或需登录）".into())
+    })?;
+    Ok(crate::biliapi::stream::select_streams(
+        &dash,
+        types::MediaFormat(format),
+    ))
+}
+
 /// 获取收藏夹列表（无需 WBI 签名，分页）
 /// 对应 `x/v3/fav/resource/list`
 pub async fn get_fav_list(
