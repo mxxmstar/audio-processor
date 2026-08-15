@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 /// 解析请求参数
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolveInput {
     /// 原始输入：BV 号 / AV 号 / 链接 / 合集(ss) / 番剧(ep)
     pub input: String,
@@ -33,6 +34,7 @@ pub struct ResolveInput {
 
 /// 启动下载请求
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartDownloadInput {
     #[serde(default)]
     pub output_dir: Option<String>,
