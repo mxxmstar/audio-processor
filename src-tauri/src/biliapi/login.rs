@@ -24,6 +24,22 @@ pub async fn new_qr_info() -> Result<types::QrInfo> {
     base.into_result()
 }
 
+/// 将二维码登录 URL 编码为 SVG 字符串（前端可直接 `<img src="data:image/svg+xml,...">` 渲染）。
+/// B 站 `qrcode/generate` 返回的 `url` 是扫码跳转链接，本身不是图片，
+/// 必须由本端生成二维码图像。
+pub fn generate_qr_svg(url: &str) -> Result<String> {
+    use qrcode::render::svg;
+    use qrcode::QrCode;
+    let code = QrCode::new(url).map_err(|e| BiliApiError::Other(format!("生成二维码失败: {}", e)))?;
+    let svg = code
+        .render()
+        .min_dimensions(240, 240)
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok(svg)
+}
+
 /// 轮询二维码状态，登录成功时返回 SESSDATA
 /// 对应 `passport.bilibili.com/x/passport-login/web/qrcode/poll`
 /// 返回 (状态, 可选 SESSDATA)

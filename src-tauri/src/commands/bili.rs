@@ -43,7 +43,8 @@ pub struct StartDownloadInput {
 /// 生成的登录二维码
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginQr {
-    pub qr_url: String,
+    /// 二维码 SVG（data URL 可直接 `<img src>` 渲染）
+    pub qr_svg: String,
     pub qr_key: String,
 }
 
@@ -330,10 +331,28 @@ pub fn bili_list_tasks(state: State<'_, BiliState>) -> Result<Vec<DownloadTask>,
 #[tauri::command]
 pub async fn bili_login_qr() -> Result<LoginQr, String> {
     let info: QrInfo = login::new_qr_info().await.map_err(|e| e.to_string())?;
+    let svg = login::generate_qr_svg(&info.url).map_err(|e| e.to_string())?;
     Ok(LoginQr {
-        qr_url: info.url,
+        qr_svg: format!("data:image/svg+xml;charset=utf-8,{}", urlencoding(&svg)),
         qr_key: info.qrcode_key,
     })
+}
+
+/// 对 SVG 字符串做 URL 编码以嵌入 data URL（避免 `#`/`"` 等破坏属性）
+fn urlencoding(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 /// 轮询登录二维码状态；成功则自动持久化 SESSDATA

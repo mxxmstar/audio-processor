@@ -29,7 +29,7 @@
   }
 
   interface LoginQr {
-    qr_url: string;
+    qr_svg: string;
     qr_key: string;
   }
 
@@ -200,7 +200,7 @@
   {#if showQr && qr}
     <div class="qr">
       <p>使用 B站 APP 扫码登录</p>
-      <img src={qr.qr_url} alt="qr" width="240" height="240" />
+      <img src={qr.qr_svg} alt="qr" width="240" height="240" />
     </div>
   {/if}
 
