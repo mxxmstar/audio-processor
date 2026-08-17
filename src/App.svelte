@@ -1,356 +1,107 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
-  import { open } from '@tauri-apps/plugin-dialog';
-  import { onMount } from 'svelte';
+  import DownloadView from './DownloadView.svelte';
+  import RecognizerView from './RecognizerView.svelte';
 
-  type TaskStatus = 'Pending' | 'Downloading' | 'Completed' | 'Failed';
-
-  interface Task {
-    id: string;
-    title: string;
-    bvid: string;
-    page: number;
-    part: string;
-    mode: string;
-    out_path: string;
-    status: TaskStatus;
-    error: string | null;
-  }
-
-  interface ProgressEvent {
-    task_id: string;
-    title: string;
-    status: string;
-    percent: number;
-    downloaded: number;
-    total: number;
-    speed: number;
-    error: string | null;
-  }
-
-  interface LoginQr {
-    qr_svg: string;
-    qr_key: string;
-  }
-
-  interface LoginState {
-    authed: boolean;
-    message: string;
-  }
-
-  // ---- 状态 ----
-  let loggedIn = $state(false);
-  let checkingLogin = $state(true);
-
-  let inputUrl = $state('');
-  let preferFormat = $state('1080P');
-  let mode = $state('audio'); // audio | video | merge
-  let outputDir = $state('');
-
-  let tasks = $state<Task[]>([]);
-  let resolving = $state(false);
-  let downloading = $state(false);
-  let message = $state('');
-
-  // 登录二维码弹窗
-  let showQr = $state(false);
-  let qr = $state<LoginQr | null>(null);
-  let qrPolling = $state<number | null>(null);
-
-  const progressMap = $state<Record<string, ProgressEvent>>({});
-
-  function fmtBytes(n: number): string {
-    if (!n) return '0 B';
-    const u = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(n) / Math.log(1024));
-    return (n / Math.pow(1024, i)).toFixed(2) + ' ' + u[i];
-  }
-
-  async function pickDir() {
-    try {
-      const sel = await open({
-        directory: true,
-        multiple: false,
-        title: '选择下载目录',
-      });
-      if (typeof sel === 'string') {
-        outputDir = sel;
-      }
-    } catch (e) {
-      message = '选择目录失败：' + String(e);
-    }
-  }
-
-  async function refreshLogin() {
-    checkingLogin = true;
-    try {
-      loggedIn = await invoke<boolean>('bili_check_login');
-    } catch {
-      loggedIn = false;
-    } finally {
-      checkingLogin = false;
-    }
-  }
-
-  async function doResolve() {
-    if (!loggedIn) {
-      message = '请先扫码登录';
-      return;
-    }
-    if (!inputUrl.trim()) {
-      message = '请输入 BV 号或链接';
-      return;
-    }
-    resolving = true;
-    message = '';
-    try {
-      tasks = await invoke<Task[]>('bili_resolve', {
-        input: {
-          input: inputUrl.trim(),
-          mode,
-          preferFormat,
-          outputDir: outputDir || null,
-        },
-      });
-    } catch (e) {
-      message = String(e);
-      tasks = [];
-    } finally {
-      resolving = false;
-    }
-  }
-
-  async function doDownload() {
-    if (tasks.length === 0) return;
-    downloading = true;
-    message = '开始下载…';
-    try {
-      await invoke<string[]>('bili_start_download', {
-        input: { outputDir: outputDir || null, concurrency: 3 },
-      });
-    } catch (e) {
-      message = String(e);
-      downloading = false;
-    }
-  }
-
-  async function doLogout() {
-    await invoke('bili_logout');
-    loggedIn = false;
-    tasks = [];
-  }
-
-  async function openQr() {
-    showQr = true;
-    try {
-      qr = await invoke<LoginQr>('bili_login_qr');
-      startPoll();
-    } catch (e) {
-      message = '生成二维码失败：' + String(e);
-    }
-  }
-
-  function startPoll() {
-    stopPoll();
-    qrPolling = setInterval(async () => {
-      if (!qr) return;
-      try {
-        const r = await invoke<LoginState>('bili_login_poll', { qrKey: qr.qr_key });
-        if (r.authed) {
-          loggedIn = true;
-          showQr = false;
-          stopPoll();
-          qr = null;
-          message = '登录成功';
-        }
-      } catch {
-        /* 继续轮询 */
-      }
-    }, 2000) as unknown as number;
-  }
-
-  function stopPoll() {
-    if (qrPolling !== null) {
-      clearInterval(qrPolling);
-      qrPolling = null;
-    }
-  }
-
-  onMount(() => {
-    refreshLogin();
-    const off1 = listen<ProgressEvent>('download-progress', (e) => {
-      progressMap[e.payload.task_id] = e.payload;
-    });
-    const off2 = listen<{ ok: boolean; failed: number }>('download-finished', (e) => {
-      downloading = false;
-      message = e.payload.ok ? '全部下载完成' : `下载结束，${e.payload.failed} 个失败`;
-      // 刷新任务状态
-      invoke<Task[]>('bili_list_tasks')
-        .then((t) => (tasks = t))
-        .catch(() => {});
-    });
-    return async () => {
-      stopPoll();
-      (await off1)();
-      (await off2)();
-    };
-  });
+  // 当前选中的菜单项：download | recognize
+  let active = $state<'download' | 'recognize'>('download');
 </script>
 
-<main>
-  <h1>B音频处理 / B站下载器</h1>
-
-  {#if checkingLogin}
-    <p>检查登录态…</p>
-  {:else if !loggedIn}
-    <button onclick={openQr}>扫码登录</button>
-    {#if message}<p class="msg">{message}</p>{/if}
-  {:else}
-    <div class="bar">
-      <span class="ok">已登录</span>
-      <button onclick={doLogout}>登出</button>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">♪</span>
+      <span class="brand-name">Audio Processor</span>
     </div>
-  {/if}
-
-  {#if showQr && qr}
-    <div class="qr">
-      <p>使用 B站 APP 扫码登录</p>
-      <img src={qr.qr_svg} alt="qr" width="240" height="240" />
-    </div>
-  {/if}
-
-  {#if loggedIn}
-    <section class="input">
-      <input
-        placeholder="BV 号 / 链接 / av 号 / 合集(ss) / 番剧"
-        bind:value={inputUrl}
-      />
-      <select bind:value={mode}>
-        <option value="audio">仅音频</option>
-        <option value="video">仅视频</option>
-        <option value="merge">音视频合并</option>
-      </select>
-      <select bind:value={preferFormat}>
-        <option>360P</option>
-        <option>720P</option>
-        <option>1080P</option>
-        <option>4K</option>
-        <option>8K</option>
-      </select>
-      <button onclick={pickDir}>选择目录</button>
-      <span class="dir" title={outputDir}>
-        {outputDir || '默认：应用配置目录'}
-      </span>
-      <button onclick={doResolve} disabled={resolving}>
-        {resolving ? '解析中…' : '解析'}
+    <nav>
+      <button
+        class="nav-item"
+        class:active={active === 'download'}
+        onclick={() => (active = 'download')}
+      >
+        <span class="nav-icon">⬇</span> B站下载
       </button>
-      <button onclick={doDownload} disabled={downloading || tasks.length === 0}>
-        {downloading ? '下载中…' : '开始下载'}
+      <button
+        class="nav-item"
+        class:active={active === 'recognize'}
+        onclick={() => (active = 'recognize')}
+      >
+        <span class="nav-icon">🔍</span> 音频识别
       </button>
-    </section>
+    </nav>
+  </aside>
 
-    {#if message}<p class="msg">{message}</p>{/if}
-
-    {#if tasks.length}
-      <ul class="tasks">
-        {#each tasks as t (t.id)}
-          {@const pg = progressMap[t.id]}
-          <li>
-            <div class="t-title">{t.title}{t.part ? ' - ' + t.part : ''}</div>
-            <div class="t-meta">
-              {t.mode} · {t.status}
-              {#if pg}
-                · {fmtBytes(pg.downloaded)}{pg.total ? ' / ' + fmtBytes(pg.total) : ''}
-                · {fmtBytes(pg.speed)}/s
-              {/if}
-              {#if t.error}<span class="err"> · {t.error}</span>{/if}
-            </div>
-            <div class="progress">
-              <div
-                class="fill"
-                style="width: {pg ? Math.round(pg.percent * 100) : (t.status === 'Completed' ? 100 : 0)}%"
-              ></div>
-            </div>
-          </li>
-        {/each}
-      </ul>
+  <main class="content">
+    {#if active === 'download'}
+      <DownloadView />
+    {:else}
+      <RecognizerView />
     {/if}
-  {/if}
-</main>
+  </main>
+</div>
 
 <style>
-  main {
-    max-width: 720px;
-    margin: 2rem auto;
-    padding: 0 1rem;
-    font-family: system-ui, sans-serif;
-  }
-  h1 {
-    font-size: 1.4rem;
-  }
-  .bar {
+  .layout {
     display: flex;
-    gap: 0.5rem;
+    height: 100vh;
+    width: 100vw;
+  }
+  .sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    background: #1f2937;
+    color: #e5e7eb;
+    display: flex;
+    flex-direction: column;
+    padding: 1rem 0;
+  }
+  .brand {
+    display: flex;
     align-items: center;
-  }
-  .ok {
-    color: #1a7f37;
-    font-weight: 600;
-  }
-  .input {
-    display: flex;
-    flex-wrap: wrap;
     gap: 0.5rem;
-    margin: 1rem 0;
+    padding: 0 1.2rem 1rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    border-bottom: 1px solid #374151;
+    margin-bottom: 0.5rem;
   }
-  .input input,
-  .input select {
-    padding: 0.4rem;
+  .logo {
+    color: #38bdf8;
+    font-size: 1.3rem;
   }
-  .input input:first-child {
-    flex: 1 1 240px;
+  nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0 0.6rem;
   }
-  button {
-    padding: 0.4rem 0.8rem;
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    text-align: left;
+    padding: 0.7rem 0.8rem;
+    border: none;
+    background: transparent;
+    color: #cbd5e1;
+    font-size: 0.95rem;
+    border-radius: 8px;
     cursor: pointer;
   }
-  .msg {
-    color: #b35900;
+  .nav-item:hover {
+    background: #374151;
+    color: #fff;
   }
-  .qr {
-    margin: 1rem 0;
+  .nav-item.active {
+    background: #2563eb;
+    color: #fff;
   }
-  .tasks {
-    list-style: none;
-    padding: 0;
+  .nav-icon {
+    font-size: 1rem;
   }
-  .tasks li {
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    padding: 0.6rem;
-    margin-bottom: 0.6rem;
-  }
-  .t-title {
-    font-weight: 600;
-  }
-  .t-meta {
-    font-size: 0.8rem;
-    color: #555;
-    margin: 0.3rem 0;
-  }
-  .err {
-    color: #c00;
-  }
-  .progress {
-    height: 8px;
-    background: #eee;
-    border-radius: 4px;
+  .content {
+    flex: 1;
+    background: #f5f7fa;
     overflow: hidden;
-  }
-  .fill {
-    height: 100%;
-    background: #1a7f37;
-    transition: width 0.2s;
   }
 </style>
