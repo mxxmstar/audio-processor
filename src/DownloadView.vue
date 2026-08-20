@@ -270,10 +270,12 @@ onUnmounted(() => {
       :footer="null"
       centered
     >
-      <div class="qr-wrap" v-if="qr">
-        <p>使用 B站 APP 扫码登录</p>
-        <img :src="qr.qr_svg" alt="qr" width="240" height="240" />
-      </div>
+      <a-spin :spinning="!qr" tip="正在生成登录二维码…">
+        <div class="qr-wrap" v-if="qr">
+          <p>使用 B站 APP 扫码登录</p>
+          <img :src="qr.qr_svg" alt="qr" width="240" height="240" />
+        </div>
+      </a-spin>
     </a-modal>
 
     <a-card v-if="loggedIn" title="B站下载" :bordered="false" class="main-card">

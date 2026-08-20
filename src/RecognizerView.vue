@@ -101,25 +101,30 @@ async function doIdentify() {
         :message="message"
       />
 
-      <a-card v-if="result" size="small" class="result-card" :bordered="false">
-        <a-descriptions :column="1" bordered size="small">
-          <a-descriptions-item label="标题">
-            {{ result.title }}
-          </a-descriptions-item>
-          <a-descriptions-item label="艺术家">
-            {{ result.artist }}
-          </a-descriptions-item>
-          <a-descriptions-item label="专辑">
-            {{ result.album ?? "—" }}
-          </a-descriptions-item>
-          <a-descriptions-item label="发行日期">
-            {{ result.album_date ?? "—" }}
-          </a-descriptions-item>
-          <a-descriptions-item label="置信度">
-            {{ result.confidence.toFixed(1) }}%
-          </a-descriptions-item>
-        </a-descriptions>
-      </a-card>
+      <a-spin :spinning="identifying" tip="正在计算音频指纹并查询 AcoustID…">
+        <a-card v-if="result" size="small" class="result-card" :bordered="false">
+          <a-descriptions :column="1" bordered size="small">
+            <a-descriptions-item label="标题">
+              {{ result.title }}
+            </a-descriptions-item>
+            <a-descriptions-item label="艺术家">
+              {{ result.artist }}
+            </a-descriptions-item>
+            <a-descriptions-item label="专辑">
+              {{ result.album ?? "—" }}
+            </a-descriptions-item>
+            <a-descriptions-item label="发行日期">
+              {{ result.album_date ?? "—" }}
+            </a-descriptions-item>
+            <a-descriptions-item label="置信度">
+              {{ result.confidence.toFixed(1) }}%
+            </a-descriptions-item>
+          </a-descriptions>
+        </a-card>
+        <div v-else-if="!identifying" class="placeholder">
+          选择音频文件并点击「开始识别」以查看结果
+        </div>
+      </a-spin>
     </a-card>
   </div>
 </template>
@@ -146,5 +151,14 @@ async function doIdentify() {
 .result-card {
   margin-top: 1rem;
   background: #fafafa;
+}
+.placeholder {
+  margin-top: 1rem;
+  padding: 2rem;
+  text-align: center;
+  color: #9ca3af;
+  background: #fafafa;
+  border: 1px dashed #e2e8f0;
+  border-radius: 8px;
 }
 </style>
