@@ -1,13 +1,16 @@
 use tauri::AppHandle;
 use tauri::Manager;
 
-use crate::recognizer::{history, run_identify, SongInfo};
+use crate::history::{self, HistoryKind};
+use crate::recognizer::run_identify;
+use crate::recognizer::SongInfo;
 
 /// 阶段 5：B 站下载相关 Tauri 命令
 pub mod bili;
 
 /// 解析历史数据库目录：优先应用配置目录，回退资源目录，再回退仓库 bin 旁。
-fn history_dir(app: &AppHandle) -> std::path::PathBuf {
+/// 供 `commands` 与 `commands::bili` 共用。
+pub(crate) fn history_dir(app: &AppHandle) -> std::path::PathBuf {
     if let Ok(dir) = app.path().app_config_dir() {
         return dir;
     }
@@ -18,7 +21,7 @@ fn history_dir(app: &AppHandle) -> std::path::PathBuf {
 }
 
 /// Tauri 命令：供前端通过 `invoke('identify', { path })` 调用。
-/// 接收音频文件绝对路径，返回识别结果；成功后自动写入历史库（失败仅告警不阻断）。
+/// 接收音频文件绝对路径，返回识别结果；成功后自动写入通用历史库。
 #[tauri::command]
 pub fn identify(app: AppHandle, path: String) -> Result<SongInfo, String> {
     // 解析随附的 fpcalc 工具路径（开发期与打包后位置不同）
@@ -42,9 +45,12 @@ pub fn identify(app: AppHandle, path: String) -> Result<SongInfo, String> {
     })
     .map_err(|e| e.to_string())?;
 
-    // 识别成功，自动落历史库（失败不影响返回结果）
+    // 识别成功，写入通用历史库（失败不影响返回结果）
     if let Ok(conn) = history::open_db(&history_dir(&app)) {
-        if let Err(e) = history::insert_record(&conn, &result, &path) {
+        let payload = serde_json::to_string(&result).unwrap_or_default();
+        if let Err(e) =
+            history::insert(&conn, HistoryKind::Recognize, &result.title, &result.artist, &payload)
+        {
             eprintln!("[history] 写入识别历史失败: {e}");
         }
     }
@@ -52,23 +58,21 @@ pub fn identify(app: AppHandle, path: String) -> Result<SongInfo, String> {
     Ok(result)
 }
 
-/// 获取识别历史列表（按时间倒序，默认 100 条）。
+/// 通用历史查询：按种类过滤（可选），返回最近 `limit` 条（默认 200）。
 #[tauri::command]
-pub fn get_recognize_history(app: AppHandle, limit: Option<usize>) -> Result<Vec<history::HistoryRecord>, String> {
+pub fn get_history(
+    app: AppHandle,
+    kind: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<history::HistoryItem>, String> {
     let conn = history::open_db(&history_dir(&app)).map_err(|e| e.to_string())?;
-    history::list_records(&conn, limit.unwrap_or(100)).map_err(|e| e.to_string())
-}
-
-/// 按 id 获取单条历史记录。
-#[tauri::command]
-pub fn get_recognize_record(app: AppHandle, id: i64) -> Result<Option<history::HistoryRecord>, String> {
-    let conn = history::open_db(&history_dir(&app)).map_err(|e| e.to_string())?;
-    history::get_record(&conn, id).map_err(|e| e.to_string())
+    let kind_ref = kind.as_deref();
+    history::list(&conn, kind_ref, limit.unwrap_or(200)).map_err(|e| e.to_string())
 }
 
 /// 按 id 删除一条历史记录。
 #[tauri::command]
-pub fn delete_recognize_record(app: AppHandle, id: i64) -> Result<(), String> {
+pub fn delete_history(app: AppHandle, id: i64) -> Result<(), String> {
     let conn = history::open_db(&history_dir(&app)).map_err(|e| e.to_string())?;
-    history::delete_record(&conn, id).map_err(|e| e.to_string())
+    history::delete(&conn, id).map_err(|e| e.to_string())
 }

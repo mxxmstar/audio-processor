@@ -4,26 +4,35 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import { HistoryOutlined, DeleteOutlined } from "@ant-design/icons-vue";
 
-interface HistoryRecord {
+interface HistoryItem {
   id: number;
+  kind: string;
   title: string;
-  artist: string;
-  album: string | null;
-  album_date: string | null;
-  confidence: number;
-  file_path: string;
+  subtitle: string;
+  /** 业务详情的 JSON 字符串（识别为 SongInfo、下载为 DownloadTask） */
+  payload: string;
   created_at: string;
 }
 
-const records = ref<HistoryRecord[]>([]);
+type KindFilter = "all" | "recognize" | "download";
+
+const kindLabels: Record<string, string> = {
+  recognize: "音频识别",
+  download: "B站下载",
+};
+
+const activeKind = ref<KindFilter>("all");
+const records = ref<HistoryItem[]>([]);
 const loading = ref(false);
-const detail = ref<HistoryRecord | null>(null);
+const detail = ref<HistoryItem | null>(null);
 const detailOpen = ref(false);
 
 async function load() {
   loading.value = true;
   try {
-    records.value = await invoke<HistoryRecord[]>("get_recognize_history", {
+    const kind = activeKind.value === "all" ? null : activeKind.value;
+    records.value = await invoke<HistoryItem[]>("get_history", {
+      kind,
       limit: 200,
     });
   } catch (e) {
@@ -35,7 +44,7 @@ async function load() {
 
 async function remove(id: number) {
   try {
-    await invoke("delete_recognize_record", { id });
+    await invoke("delete_history", { id });
     message.success("已删除");
     await load();
   } catch (e) {
@@ -43,9 +52,17 @@ async function remove(id: number) {
   }
 }
 
-function view(rec: HistoryRecord) {
+function view(rec: HistoryItem) {
   detail.value = rec;
   detailOpen.value = true;
+}
+
+function payloadText(json: string): string {
+  try {
+    return JSON.stringify(JSON.parse(json), null, 2);
+  } catch {
+    return json;
+  }
 }
 
 onMounted(load);
@@ -53,28 +70,38 @@ onMounted(load);
 
 <template>
   <div class="panel">
-    <a-card title="识别历史" :bordered="false" class="main-card">
+    <a-card title="历史记录" :bordered="false" class="main-card">
       <template #extra>
-        <a-button size="small" :loading="loading" @click="load">
-          刷新
-        </a-button>
+        <a-space>
+          <a-segmented
+            v-model:value="activeKind"
+            :options="[
+              { label: '全部', value: 'all' },
+              { label: '音频识别', value: 'recognize' },
+              { label: 'B站下载', value: 'download' },
+            ]"
+            @change="load"
+          />
+          <a-button size="small" :loading="loading" @click="load">刷新</a-button>
+        </a-space>
       </template>
 
       <a-spin :spinning="loading">
-        <a-empty v-if="!records.length && !loading" description="暂无识别记录" />
+        <a-empty v-if="!records.length && !loading" description="暂无历史记录" />
 
         <a-list v-else :data-source="records" item-layout="horizontal" class="hist-list">
           <template #renderItem="{ item }">
             <a-list-item>
               <a-list-item-meta>
                 <template #title>
+                  <a-tag :color="item.kind === 'download' ? 'blue' : 'green'">
+                    {{ kindLabels[item.kind] ?? item.kind }}
+                  </a-tag>
                   <a-typography-text strong>{{ item.title }}</a-typography-text>
-                  <span class="artist"> · {{ item.artist }}</span>
                 </template>
                 <template #description>
                   <span class="meta">
-                    {{ item.album ?? "未知专辑" }} · 置信度
-                    {{ item.confidence.toFixed(1) }}% · {{ item.created_at }}
+                    {{ item.subtitle || "—" }} · {{ item.created_at }}
                   </span>
                 </template>
                 <template #avatar>
@@ -98,29 +125,25 @@ onMounted(load);
 
     <a-drawer
       v-model:open="detailOpen"
-      title="识别详情"
-      width="420"
+      title="记录详情"
+      width="460"
       :footer="null"
     >
       <a-descriptions v-if="detail" :column="1" bordered size="small">
-        <a-descriptions-item label="标题">{{ detail.title }}</a-descriptions-item>
-        <a-descriptions-item label="艺术家">{{ detail.artist }}</a-descriptions-item>
-        <a-descriptions-item label="专辑">
-          {{ detail.album ?? "—" }}
+        <a-descriptions-item label="类型">
+          {{ kindLabels[detail.kind] ?? detail.kind }}
         </a-descriptions-item>
-        <a-descriptions-item label="发行日期">
-          {{ detail.album_date ?? "—" }}
+        <a-descriptions-item label="标题">
+          {{ detail.title }}
         </a-descriptions-item>
-        <a-descriptions-item label="置信度">
-          {{ detail.confidence.toFixed(1) }}%
+        <a-descriptions-item label="副标题">
+          {{ detail.subtitle || "—" }}
         </a-descriptions-item>
-        <a-descriptions-item label="识别时间">
+        <a-descriptions-item label="记录时间">
           {{ detail.created_at }}
         </a-descriptions-item>
-        <a-descriptions-item label="文件路径">
-          <a-typography-text :ellipsis="{ tooltip: detail.file_path }">
-            {{ detail.file_path }}
-          </a-typography-text>
+        <a-descriptions-item label="详情">
+          <pre class="payload">{{ payloadText(detail.payload) }}</pre>
         </a-descriptions-item>
       </a-descriptions>
     </a-drawer>
@@ -139,11 +162,19 @@ onMounted(load);
 .hist-list {
   margin-top: 0.5rem;
 }
-.artist {
-  color: #6b7280;
-}
 .meta {
   font-size: 0.8rem;
   color: #8a94a6;
+}
+.payload {
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.75rem;
+  background: #f5f5f5;
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin: 0;
 }
 </style>

@@ -320,6 +320,25 @@ pub async fn bili_start_download(
     tauri::async_runtime::spawn(async move {
         let results = crate::biliapi::task::run_batch(client, &mut tasks_ref, concurrency, prog_cb).await;
         let failed: Vec<_> = results.iter().enumerate().filter(|(_, r)| r.is_err()).collect();
+
+        // 下载完成后写入通用历史库（每条任务一条，含最终状态/错误）
+        let hist_dir = crate::commands::history_dir(&app2);
+        if let Ok(conn) = crate::history::open_db(&hist_dir) {
+            for t in tasks_ref.iter() {
+                let subtitle = format!("{} · {}", mode_label(t.mode), status_label(t.status));
+                let payload = serde_json::to_string(t).unwrap_or_default();
+                if let Err(e) = crate::history::insert(
+                    &conn,
+                    crate::history::HistoryKind::Download,
+                    &t.title,
+                    &subtitle,
+                    &payload,
+                ) {
+                    eprintln!("[history] 写入下载历史失败: {e}");
+                }
+            }
+        }
+
         let _ = app2.emit(
             "download-finished",
             serde_json::json!({ "ok": failed.is_empty(), "failed": failed.len() }),
@@ -409,6 +428,17 @@ fn status_label(s: crate::biliapi::task::DownloadStatus) -> String {
         DownloadStatus::Downloading => "下载中",
         DownloadStatus::Completed => "已完成",
         DownloadStatus::Failed => "失败",
+    }
+    .to_string()
+}
+
+/// 将 `DownloadMode` 转为可读中文标签
+fn mode_label(m: crate::biliapi::task::DownloadMode) -> String {
+    use crate::biliapi::task::DownloadMode;
+    match m {
+        DownloadMode::AudioOnly => "仅音频",
+        DownloadMode::VideoOnly => "仅视频",
+        DownloadMode::Merge => "音视频合并",
     }
     .to_string()
 }

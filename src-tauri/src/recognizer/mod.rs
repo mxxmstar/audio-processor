@@ -13,7 +13,6 @@
 pub mod acoustid;     // AcoustID 指纹查询
 pub mod error;        // 统一错误类型
 pub mod fingerprint;  // 音频解码 + Chromaprint 指纹生成
-pub mod history;      // 识别历史 SQLite 持久化（阶段 B）
 pub mod musicbrainz;  // MusicBrainz 曲目详情查询
 
 // 重导出常用类型，方便命令层直接 `use crate::recognizer::*` 取到

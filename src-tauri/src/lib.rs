@@ -4,6 +4,7 @@ pub mod recognizer;     // 音频识别独立模块（指纹/查询/错误集中
 pub mod http_client;    // HTTP 客户端封装（用于向外部服务器如 B 站发送请求）
 pub mod biliapi;        // B 站 API 封装（基于 http_client，封装 bilidownload 中的 B 站调用）
 pub mod bili_state;     // 阶段 5：B 站功能共享状态（登录态目录 + 任务列表）
+pub mod history;        // 通用历史记录模块（音频识别 / B站下载共用）
 
 use bili_state::BiliState;
 use tauri::Manager;
@@ -37,9 +38,8 @@ pub fn run() {
         // 注册命令，使前端可通过 invoke 调用
         .invoke_handler(tauri::generate_handler![
             commands::identify,
-            commands::get_recognize_history,
-            commands::get_recognize_record,
-            commands::delete_recognize_record,
+            commands::get_history,
+            commands::delete_history,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_start_download,
