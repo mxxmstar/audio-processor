@@ -10,13 +10,15 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-dialog": "^2.0.0"
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "ant-design-vue": "^4.2.6",
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
-    "svelte": "^5.0.0",
+    "@vitejs/plugin-vue": "^5.2.1",
     "vite": "^5.4.0"
   }
 }

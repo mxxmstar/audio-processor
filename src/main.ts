@@ -1,9 +1,9 @@
+import { createApp } from "vue";
+import App from "./App.vue";
+import Antd from "ant-design-vue";
+import "ant-design-vue/dist/reset.css";
 import "./app.css";
-import App from "./App.svelte";
-import { mount } from "svelte";
 
-const app = mount(App, {
-  target: document.getElementById("app")!,
-});
-
-export default app;
+const app = createApp(App);
+app.use(Antd);
+app.mount("#app");
