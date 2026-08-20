@@ -14,21 +14,15 @@ interface HistoryItem {
   created_at: string;
 }
 
-type KindFilter = "all" | "recognize" | "download";
+type KindFilter = "recognize" | "download";
 
-const props = withDefaults(
-  defineProps<{ kind?: KindFilter }>(),
-  { kind: "all" },
-);
+const props = defineProps<{ kind: KindFilter }>();
 
 const kindLabels: Record<string, string> = {
   recognize: "音频识别",
   download: "B站下载",
 };
 
-const activeKind = ref<KindFilter>(props.kind);
-// 外部指定具体种类（如 B站下载历史）时锁定过滤，不显示分类切换
-const locked = props.kind !== "all";
 const records = ref<HistoryItem[]>([]);
 const loading = ref(false);
 const detail = ref<HistoryItem | null>(null);
@@ -37,9 +31,8 @@ const detailOpen = ref(false);
 async function load() {
   loading.value = true;
   try {
-    const kind = activeKind.value === "all" ? null : activeKind.value;
     records.value = await invoke<HistoryItem[]>("get_history", {
-      kind,
+      kind: props.kind,
       limit: 200,
     });
   } catch (e) {
@@ -77,19 +70,9 @@ onMounted(load);
 
 <template>
   <div class="panel">
-    <a-card title="历史记录" :bordered="false" class="main-card">
+    <a-card :title="`${kindLabels[props.kind]}历史`" :bordered="false" class="main-card">
       <template #extra>
         <a-space>
-          <a-segmented
-            v-if="!locked"
-            v-model:value="activeKind"
-            :options="[
-              { label: '全部', value: 'all' },
-              { label: '音频识别', value: 'recognize' },
-              { label: 'B站下载', value: 'download' },
-            ]"
-            @change="load"
-          />
           <a-button size="small" :loading="loading" @click="load">刷新</a-button>
         </a-space>
       </template>
