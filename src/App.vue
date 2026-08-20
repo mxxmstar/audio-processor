@@ -9,17 +9,23 @@ import {
   HistoryOutlined,
 } from "@ant-design/icons-vue";
 
-type ViewKey = "download" | "recognize" | "history";
+type ViewKey = "download" | "recognize" | "history" | "download-history";
 const active = ref<ViewKey>("download");
-// 音频识别子菜单展开状态（受控）
+// 子菜单展开状态（受控）
 const openKeys = ref<string[]>([]);
+// 历史视图过滤种类：音频识别历史显示全部、B站下载历史仅下载类
+const historyKind = ref<"all" | "recognize" | "download">("all");
 
-// antd Menu 的 items：音频识别作为父项，下挂「识别」「历史记录」两个子项
+// antd Menu 的 items：音频识别与 B站下载均作为父项，各自下挂「操作」「历史记录」子项
 const items = [
   {
-    key: "download",
+    key: "download-group",
     icon: h(DownloadOutlined),
     label: "B站下载",
+    children: [
+      { key: "download", icon: h(DownloadOutlined), label: "下载" },
+      { key: "download-history", icon: h(HistoryOutlined), label: "历史记录" },
+    ],
   },
   {
     key: "recognize-group",
@@ -36,6 +42,11 @@ function onMenuClick({ key }: { key: string }) {
   // 仅子项（无 children）才切换主视图
   if (key === "recognize" || key === "history" || key === "download") {
     active.value = key as ViewKey;
+    if (key === "history") historyKind.value = "all";
+    if (key === "download-history") historyKind.value = "download";
+  } else if (key === "download-history") {
+    active.value = "download-history";
+    historyKind.value = "download";
   }
 }
 
@@ -65,7 +76,8 @@ function onOpenChange(keys: string[]) {
     <a-layout-content class="content">
       <download-view v-if="active === 'download'" />
       <recognizer-view v-else-if="active === 'recognize'" />
-      <history-view v-else-if="active === 'history'" />
+      <history-view v-else-if="active === 'history'" :kind="historyKind" />
+      <history-view v-else-if="active === 'download-history'" :kind="historyKind" />
     </a-layout-content>
   </a-layout>
 </template>

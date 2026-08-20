@@ -16,12 +16,19 @@ interface HistoryItem {
 
 type KindFilter = "all" | "recognize" | "download";
 
+const props = withDefaults(
+  defineProps<{ kind?: KindFilter }>(),
+  { kind: "all" },
+);
+
 const kindLabels: Record<string, string> = {
   recognize: "音频识别",
   download: "B站下载",
 };
 
-const activeKind = ref<KindFilter>("all");
+const activeKind = ref<KindFilter>(props.kind);
+// 外部指定具体种类（如 B站下载历史）时锁定过滤，不显示分类切换
+const locked = props.kind !== "all";
 const records = ref<HistoryItem[]>([]);
 const loading = ref(false);
 const detail = ref<HistoryItem | null>(null);
@@ -74,6 +81,7 @@ onMounted(load);
       <template #extra>
         <a-space>
           <a-segmented
+            v-if="!locked"
             v-model:value="activeKind"
             :options="[
               { label: '全部', value: 'all' },
