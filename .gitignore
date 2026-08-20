@@ -41,3 +41,7 @@ wbi_cache.json
 *.video.mp4
 *.audio.tmp
 *.video.tmp
+
+# 识别历史数据库（本地 SQLite，不入库）
+recognize_history.db
+**/recognize_history.db

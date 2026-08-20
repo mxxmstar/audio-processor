@@ -37,6 +37,9 @@ pub fn run() {
         // 注册命令，使前端可通过 invoke 调用
         .invoke_handler(tauri::generate_handler![
             commands::identify,
+            commands::get_recognize_history,
+            commands::get_recognize_record,
+            commands::delete_recognize_record,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_start_download,

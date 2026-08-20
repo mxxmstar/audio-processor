@@ -2,16 +2,46 @@
 import { h, ref } from "vue";
 import DownloadView from "./DownloadView.vue";
 import RecognizerView from "./RecognizerView.vue";
+import HistoryView from "./HistoryView.vue";
 import {
   DownloadOutlined,
   AudioOutlined,
+  HistoryOutlined,
 } from "@ant-design/icons-vue";
 
-const active = ref<"download" | "recognize">("download");
+type ViewKey = "download" | "recognize" | "history";
+const active = ref<ViewKey>("download");
+// 音频识别子菜单展开状态（受控）
+const openKeys = ref<string[]>([]);
+
+// antd Menu 的 items：音频识别作为父项，下挂「识别」「历史记录」两个子项
 const items = [
-  { key: "download", icon: DownloadOutlined, label: "B站下载" },
-  { key: "recognize", icon: AudioOutlined, label: "音频识别" },
+  {
+    key: "download",
+    icon: h(DownloadOutlined),
+    label: "B站下载",
+  },
+  {
+    key: "recognize-group",
+    icon: h(AudioOutlined),
+    label: "音频识别",
+    children: [
+      { key: "recognize", icon: h(AudioOutlined), label: "识别" },
+      { key: "history", icon: h(HistoryOutlined), label: "历史记录" },
+    ],
+  },
 ];
+
+function onMenuClick({ key }: { key: string }) {
+  // 仅子项（无 children）才切换主视图
+  if (key === "recognize" || key === "history" || key === "download") {
+    active.value = key as ViewKey;
+  }
+}
+
+function onOpenChange(keys: string[]) {
+  openKeys.value = keys;
+}
 </script>
 
 <template>
@@ -23,16 +53,19 @@ const items = [
       </div>
       <a-menu
         :selectedKeys="[active]"
+        :openKeys="openKeys"
         theme="dark"
         mode="inline"
-        :items="items.map((i) => ({ key: i.key, icon: h(i.icon), label: i.label }))"
-        @click="({ key }) => (active = key as 'download' | 'recognize')"
+        :items="items"
+        @click="onMenuClick"
+        @openChange="onOpenChange"
       />
     </a-layout-sider>
 
     <a-layout-content class="content">
       <download-view v-if="active === 'download'" />
-      <recognizer-view v-else />
+      <recognizer-view v-else-if="active === 'recognize'" />
+      <history-view v-else-if="active === 'history'" />
     </a-layout-content>
   </a-layout>
 </template>
