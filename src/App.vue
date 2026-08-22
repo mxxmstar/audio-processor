@@ -57,6 +57,7 @@ const checkingLogin = ref(true);
 const showQr = ref(false);
 const qr = ref<{ qr_svg: string; qr_key: string } | null>(null);
 const userInfo = ref<{ name: string; face: string } | null>(null);
+const imgError = ref(false);
 let qrPolling: number | null = null;
 
 async function loadUserInfo() {
@@ -151,14 +152,30 @@ onUnmounted(stopPoll);
         </template>
         <a-space v-else direction="vertical" :size="8" class="login-info" style="width: 100%">
           <a-space align="center" :size="8">
-            <a-avatar :src="userInfo?.face" :size="36">
+            <img
+              v-if="userInfo?.face && !imgError"
+              :src="userInfo.face"
+              referrerpolicy="no-referrer"
+              class="avatar-img"
+              width="36"
+              height="36"
+              alt="avatar"
+              @error="imgError = true"
+            />
+            <a-avatar v-else :size="36">
               <template #icon><UserOutlined /></template>
             </a-avatar>
             <span class="login-text">{{ userInfo?.name || "已登录" }}</span>
           </a-space>
-          <a-button block size="small" @click="doLogout">
+          <a-button
+            class="logout-btn"
+            type="text"
+            size="small"
+            block
+            @click="doLogout"
+          >
             <template #icon><LogoutOutlined /></template>
-            登出
+            退出登录
           </a-button>
         </a-space>
       </div>
@@ -218,6 +235,26 @@ onUnmounted(stopPoll);
 .login-text {
   color: #e5e7eb;
   font-size: 0.9rem;
+}
+.avatar-img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.35);
+}
+.logout-btn {
+  color: #c9d1d9;
+  border: 1px solid #3a3f47;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  transition: all 0.2s ease;
+  justify-content: flex-start;
+}
+.logout-btn:hover {
+  color: #ff7875;
+  border-color: #ff7875;
+  background: rgba(255, 77, 79, 0.1);
 }
 .content {
   background: #f5f7fa;
