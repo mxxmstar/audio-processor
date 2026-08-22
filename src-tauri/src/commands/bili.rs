@@ -57,6 +57,13 @@ pub struct LoginState {
     pub message: String,
 }
 
+/// 已登录用户的 B 站资料（头像 / 昵称）
+#[derive(Debug, Clone, Serialize)]
+pub struct BiliUserInfo {
+    pub name: String,
+    pub face: String,
+}
+
 /// 进度事件（推送到前端）
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressEvent {
@@ -407,6 +414,31 @@ pub async fn bili_check_login(state: State<'_, BiliState>) -> Result<bool, Strin
         .await
         .map_err(|e| e.to_string())?
         .is_some())
+}
+
+/// 获取已登录用户的 B 站资料（昵称 + 头像）。未登录时返回 `None`。
+#[tauri::command]
+pub async fn bili_user_info(
+    state: State<'_, BiliState>,
+) -> Result<Option<BiliUserInfo>, String> {
+    // 先按标准流程校验登录态（失效会被清除）。
+    let sessdata = match login::load_and_check(state.config_dir_opt().as_deref())
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(s) => s,
+        // 兜底：直接读落盘 SESSDATA（不触发清除），避免 `refreshLogin` 已校验过、
+        // 短时间内二次 `load_and_check` 误判为失效而拿不到资料。
+        None => match crate::biliapi::storage::load_sessdata(state.config_dir_opt().as_deref()) {
+            Some(s) if !s.is_empty() => s,
+            _ => return Ok(None),
+        },
+    };
+    let info = login::fetch_user_info(&sessdata).await.map_err(|e| e.to_string())?;
+    Ok(Some(BiliUserInfo {
+        name: info.name,
+        face: info.face,
+    }))
 }
 
 /// 登出：清除持久化登录态

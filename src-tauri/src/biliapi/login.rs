@@ -96,6 +96,34 @@ pub async fn check_login(sessdata: &str) -> Result<bool> {
     }
 }
 
+/// 获取已登录用户的昵称与头像（对应 `x/space/myinfo` 的 `data.name` / `data.face`）。
+pub struct UserInfo {
+    pub name: String,
+    pub face: String,
+}
+
+pub async fn fetch_user_info(sessdata: &str) -> Result<UserInfo> {
+    let client = BiliClient::new(sessdata);
+    let cfg = client.get(&format!("{}/x/space/myinfo", BASE_API));
+    let v: serde_json::Value = client.send_json::<serde_json::Value>(cfg).await?;
+    // 注意：B 站 `x/space/myinfo` 把用户字段直接放在根对象（无 `data` 包裹），
+    // 而 `x/web-interface/wbi/view` 等接口才用 `data` 包裹，需区分对待。
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let face = v
+        .get("face")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // B 站返回的头像多为 http://，桌面 webview 会按混合内容策略拦截，
+    // 统一升级为 https:// 以保证正常加载。
+    let face = face.replacen("http://", "https://", 1);
+    Ok(UserInfo { name, face })
+}
+
 /// 启动时自动加载持久化 SESSDATA 并校验（阶段 4.3）。
 /// 返回 `Ok(Some(sessdata))` 表示已有有效登录态；`Ok(None)` 表示需重新扫码。
 /// 加载或校验过程中任何落盘/网络故障都降级为 `None`（不致命）。

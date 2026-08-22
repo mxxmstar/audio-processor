@@ -4,8 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  QrcodeOutlined,
-  LogoutOutlined,
   FolderOpenOutlined,
   SearchOutlined,
   DownloadOutlined,
@@ -37,19 +35,8 @@ interface ProgressEvent {
   error: string | null;
 }
 
-interface LoginQr {
-  qr_svg: string;
-  qr_key: string;
-}
-
-interface LoginState {
-  authed: boolean;
-  message: string;
-}
-
-// ---- 状态 ----
-const loggedIn = ref(false);
-const checkingLogin = ref(true);
+// 从左侧栏接收登录态（登录态统一在 App.vue 管理）
+const { loggedIn } = defineProps<{ loggedIn: boolean }>();
 
 const inputUrl = ref("");
 const preferFormat = ref("1080P");
@@ -60,11 +47,6 @@ const tasks = ref<Task[]>([]);
 const resolving = ref(false);
 const downloading = ref(false);
 const message = ref("");
-
-// 登录二维码弹窗
-const showQr = ref(false);
-const qr = ref<LoginQr | null>(null);
-let qrPolling: number | null = null;
 
 const progressMap: Record<string, ProgressEvent> = reactive({});
 
@@ -110,19 +92,8 @@ async function pickDir() {
   }
 }
 
-async function refreshLogin() {
-  checkingLogin.value = true;
-  try {
-    loggedIn.value = await invoke<boolean>("bili_check_login");
-  } catch {
-    loggedIn.value = false;
-  } finally {
-    checkingLogin.value = false;
-  }
-}
-
 async function doResolve() {
-  if (!loggedIn.value) {
+  if (!loggedIn) {
     message.value = "请先扫码登录";
     return;
   }
@@ -163,55 +134,10 @@ async function doDownload() {
   }
 }
 
-async function doLogout() {
-  await invoke("bili_logout");
-  loggedIn.value = false;
-  tasks.value = [];
-}
-
-async function openQr() {
-  showQr.value = true;
-  try {
-    qr.value = await invoke<LoginQr>("bili_login_qr");
-    startPoll();
-  } catch (e) {
-    message.value = "生成二维码失败：" + String(e);
-  }
-}
-
-function startPoll() {
-  stopPoll();
-  qrPolling = setInterval(async () => {
-    if (!qr.value) return;
-    try {
-      const r = await invoke<LoginState>("bili_login_poll", {
-        qrKey: qr.value.qr_key,
-      });
-      if (r.authed) {
-        loggedIn.value = true;
-        showQr.value = false;
-        stopPoll();
-        qr.value = null;
-        message.value = "登录成功";
-      }
-    } catch {
-      /* 继续轮询 */
-    }
-  }, 2000) as unknown as number;
-}
-
-function stopPoll() {
-  if (qrPolling !== null) {
-    clearInterval(qrPolling);
-    qrPolling = null;
-  }
-}
-
 let off1: UnlistenFn | null = null;
 let off2: UnlistenFn | null = null;
 
 onMounted(async () => {
-  await refreshLogin();
   off1 = await listen<ProgressEvent>("download-progress", (e) => {
     progressMap[e.payload.task_id] = e.payload;
   });
@@ -230,7 +156,6 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  stopPoll();
   off1?.();
   off2?.();
 });
@@ -238,46 +163,6 @@ onUnmounted(() => {
 
 <template>
   <div class="panel">
-    <a-card :bordered="false" class="top-card">
-      <a-space v-if="checkingLogin">
-        <a-spin size="small" /> 检查登录态…
-      </a-space>
-      <a-alert
-        v-else-if="!loggedIn"
-        type="warning"
-        show-icon
-        message="当前未登录，部分功能受限。"
-      >
-        <template #action>
-          <a-button type="primary" size="small" @click="openQr">
-            <template #icon><QrcodeOutlined /></template>
-            扫码登录
-          </a-button>
-        </template>
-      </a-alert>
-      <a-space v-else>
-        <a-badge status="success" text="已登录" />
-        <a-button size="small" @click="doLogout">
-          <template #icon><LogoutOutlined /></template>
-          登出
-        </a-button>
-      </a-space>
-    </a-card>
-
-    <a-modal
-      v-model:open="showQr"
-      title="扫码登录"
-      :footer="null"
-      centered
-    >
-      <a-spin :spinning="!qr" tip="正在生成登录二维码…">
-        <div class="qr-wrap" v-if="qr">
-          <p>使用 B站 APP 扫码登录</p>
-          <img :src="qr.qr_svg" alt="qr" width="240" height="240" />
-        </div>
-      </a-spin>
-    </a-modal>
-
     <a-card v-if="loggedIn" title="B站下载" :bordered="false" class="main-card">
       <a-form layout="vertical">
         <a-form-item label="视频地址">
@@ -386,14 +271,8 @@ onUnmounted(() => {
   height: 100%;
   overflow-y: auto;
 }
-.top-card {
-  margin-bottom: 1rem;
-}
 .main-card {
   background: #fff;
-}
-.qr-wrap {
-  text-align: center;
 }
 .msg {
   margin: 1rem 0;

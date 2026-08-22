@@ -47,6 +47,7 @@ pub fn run() {
             commands::bili::bili_login_qr,
             commands::bili::bili_login_poll,
             commands::bili::bili_check_login,
+            commands::bili::bili_user_info,
             commands::bili::bili_logout,
         ])
         // 注册对话框插件（前端用其打开文件选择框）
