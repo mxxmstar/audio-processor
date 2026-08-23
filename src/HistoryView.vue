@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "ant-design-vue";
 import { HistoryOutlined, DeleteOutlined } from "@ant-design/icons-vue";
@@ -12,6 +12,23 @@ interface HistoryItem {
   /** 业务详情的 JSON 字符串（识别为 SongInfo、下载为 DownloadTask） */
   payload: string;
   created_at: string;
+}
+
+interface TaskGroup {
+  id: string;
+  title: string;
+}
+
+interface DownloadPayload {
+  title: string;
+  group: TaskGroup | null;
+  [k: string]: unknown;
+}
+
+interface GroupView {
+  key: string;
+  title: string;
+  items: HistoryItem[];
 }
 
 type KindFilter = "recognize" | "download";
@@ -27,6 +44,36 @@ const records = ref<HistoryItem[]>([]);
 const loading = ref(false);
 const detail = ref<HistoryItem | null>(null);
 const detailOpen = ref(false);
+const activeGroupKeys = ref<string[]>(["single"]);
+
+// 历史记录按合集分组（仅 download 类型带 group 信息）
+const groupedRecords = computed<GroupView[]>(() => {
+  const map = new Map<string, GroupView>();
+  for (const rec of records.value) {
+    let key = "single";
+    let title = "单条记录";
+    if (props.kind === "download") {
+      try {
+        const p = JSON.parse(rec.payload) as DownloadPayload;
+        if (p.group && p.group.id) {
+          key = `g:${p.group.id}`;
+          title = p.group.title || `合集 ${p.group.id}`;
+        }
+      } catch {
+        // 解析失败则归入单条
+      }
+    }
+    if (!map.has(key)) {
+      map.set(key, { key, title, items: [] });
+    }
+    map.get(key)!.items.push(rec);
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.key === "single") return 1;
+    if (b.key === "single") return -1;
+    return 0;
+  });
+});
 
 async function load() {
   loading.value = true;
@@ -35,6 +82,7 @@ async function load() {
       kind: props.kind,
       limit: 200,
     });
+    activeGroupKeys.value = groupedRecords.value.map((g) => g.key);
   } catch (e) {
     message.error("加载历史失败：" + String(e));
   } finally {
@@ -80,37 +128,58 @@ onMounted(load);
       <a-spin :spinning="loading">
         <a-empty v-if="!records.length && !loading" description="暂无历史记录" />
 
-        <a-list v-else :data-source="records" item-layout="horizontal" class="hist-list">
-          <template #renderItem="{ item }">
-            <a-list-item>
-              <a-list-item-meta>
-                <template #title>
-                  <a-tag :color="item.kind === 'download' ? 'blue' : 'green'">
-                    {{ kindLabels[item.kind] ?? item.kind }}
-                  </a-tag>
-                  <a-typography-text strong>{{ item.title }}</a-typography-text>
-                </template>
-                <template #description>
-                  <span class="meta">
-                    {{ item.subtitle || "—" }} · {{ item.created_at }}
-                  </span>
-                </template>
-                <template #avatar>
-                  <a-avatar><HistoryOutlined /></a-avatar>
-                </template>
-              </a-list-item-meta>
-              <template #actions>
-                <a-button type="link" size="small" @click="view(item)">查看</a-button>
-                <a-popconfirm title="确认删除这条记录？" @confirm="remove(item.id)">
-                  <a-button type="link" size="small" danger>
-                    <template #icon><DeleteOutlined /></template>
-                    删除
-                  </a-button>
-                </a-popconfirm>
+        <a-collapse
+          v-else
+          v-model:activeKey="activeGroupKeys"
+          class="hist-collapse"
+          :bordered="false"
+        >
+          <a-collapse-panel
+            v-for="grp in groupedRecords"
+            :key="grp.key"
+          >
+            <template #header>
+              <span class="grp-header">
+                <a-tag :color="grp.key === 'single' ? 'default' : 'purple'">
+                  {{ grp.key === "single" ? "单条" : "合集" }}
+                </a-tag>
+                <span class="grp-title">{{ grp.title }}</span>
+                <span class="grp-count">（{{ grp.items.length }} 条）</span>
+              </span>
+            </template>
+            <a-list :data-source="grp.items" item-layout="horizontal" class="hist-list">
+              <template #renderItem="{ item }">
+                <a-list-item>
+                  <a-list-item-meta>
+                    <template #title>
+                      <a-tag :color="item.kind === 'download' ? 'blue' : 'green'">
+                        {{ kindLabels[item.kind] ?? item.kind }}
+                      </a-tag>
+                      <a-typography-text strong>{{ item.title }}</a-typography-text>
+                    </template>
+                    <template #description>
+                      <span class="meta">
+                        {{ item.subtitle || "—" }} · {{ item.created_at }}
+                      </span>
+                    </template>
+                    <template #avatar>
+                      <a-avatar><HistoryOutlined /></a-avatar>
+                    </template>
+                  </a-list-item-meta>
+                  <template #actions>
+                    <a-button type="link" size="small" @click="view(item)">查看</a-button>
+                    <a-popconfirm title="确认删除这条记录？" @confirm="remove(item.id)">
+                      <a-button type="link" size="small" danger>
+                        <template #icon><DeleteOutlined /></template>
+                        删除
+                      </a-button>
+                    </a-popconfirm>
+                  </template>
+                </a-list-item>
               </template>
-            </a-list-item>
-          </template>
-        </a-list>
+            </a-list>
+          </a-collapse-panel>
+        </a-collapse>
       </a-spin>
     </a-card>
 
@@ -152,6 +221,21 @@ onMounted(load);
 }
 .hist-list {
   margin-top: 0.5rem;
+}
+.hist-collapse {
+  margin-top: 0.5rem;
+}
+.grp-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.grp-title {
+  font-weight: 600;
+}
+.grp-count {
+  color: #8a94a6;
+  font-size: 0.8rem;
 }
 .meta {
   font-size: 0.8rem;

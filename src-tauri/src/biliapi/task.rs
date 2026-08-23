@@ -37,6 +37,15 @@ pub enum DownloadStatus {
     Failed,
 }
 
+/// 合集/系列分组信息（用于前端折叠展示）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct TaskGroup {
+    /// 分组 ID（合集 season_id / 系列 id，稳定唯一）
+    pub id: String,
+    /// 分组展示标题（合集/系列名）
+    pub title: String,
+}
+
 /// 单个下载任务
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DownloadTask {
@@ -56,11 +65,20 @@ pub struct DownloadTask {
     pub status: DownloadStatus,
     /// 失败原因（status == Failed 时）
     pub error: Option<String>,
+    /// 所属分组（合集/系列）；非合集任务为 None
+    #[serde(default)]
+    pub group: Option<TaskGroup>,
 }
 
 impl DownloadTask {
     /// 从解析结果的一个分 P 构造任务
-    pub fn from_page(res: &ResolveResult, page: &PageStream, mode: DownloadMode, output_dir: &str) -> Self {
+    pub fn from_page(
+        res: &ResolveResult,
+        page: &PageStream,
+        mode: DownloadMode,
+        output_dir: &str,
+        group: Option<TaskGroup>,
+    ) -> Self {
         let id = format!("{}#{}", res.bvid, page.page);
         DownloadTask {
             id,
@@ -75,15 +93,22 @@ impl DownloadTask {
             output_dir: output_dir.to_string(),
             status: DownloadStatus::Pending,
             error: None,
+            group,
         }
     }
 
     /// 将一批解析结果展开为任务列表（每分 P 一个任务）
-    pub fn from_resolves(results: &[ResolveResult], mode: DownloadMode, output_dir: &str) -> Vec<Self> {
+    /// `group` 为该批所属的分组（合集/系列），用于前端折叠展示。
+    pub fn from_resolves(
+        results: &[ResolveResult],
+        mode: DownloadMode,
+        output_dir: &str,
+        group: Option<TaskGroup>,
+    ) -> Vec<Self> {
         let mut tasks = Vec::new();
         for res in results {
             for page in &res.pages {
-                tasks.push(Self::from_page(res, page, mode, output_dir));
+                tasks.push(Self::from_page(res, page, mode, output_dir, group.clone()));
             }
         }
         tasks
@@ -289,7 +314,7 @@ mod tests {
     #[test]
     fn test_from_page_mode_and_title() {
         let res = resolve_result(vec![page_stream(Some("v"), Some("a"))]);
-        let task = DownloadTask::from_page(&res, &res.pages[0], DownloadMode::Merge, "/tmp");
+        let task = DownloadTask::from_page(&res, &res.pages[0], DownloadMode::Merge, "/tmp", None);
         assert_eq!(task.id, "BV1xx#1");
         assert_eq!(task.mode, DownloadMode::Merge);
         assert_eq!(task.video_url.as_deref(), Some("v"));
@@ -303,7 +328,7 @@ mod tests {
             page_stream(Some("v1"), Some("a1")),
             page_stream(Some("v2"), Some("a2")),
         ]);
-        let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp");
+        let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp", None);
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].audio_url.as_deref(), Some("a1"));
         assert_eq!(tasks[1].video_url.as_deref(), Some("v2"));

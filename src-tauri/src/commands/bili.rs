@@ -8,7 +8,7 @@
 use crate::bili_state::BiliState;
 use crate::biliapi::client::BiliClient;
 use crate::biliapi::login;
-use crate::biliapi::task::{DownloadMode, DownloadTask};
+use crate::biliapi::task::{DownloadMode, DownloadTask, TaskGroup};
 use crate::biliapi::types::{MediaFormat, QrInfo};
 use crate::biliapi::video;
 use serde::Serialize;
@@ -131,6 +131,7 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
 
     // 识别目标类型并分发解析
     let target = identify(&input.input);
+    let mut group_opt: Option<TaskGroup> = None;
     let results = match target {
         Target::Bv(bvid) => {
             // 先取视频详情，判断是否属于合集（ugc_season）
@@ -138,7 +139,7 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
                 .await
                 .map_err(|e| e.to_string())?;
             if info.ugc_season.id > 0 {
-                video::resolve_collection(
+                let (r, g) = video::resolve_collection(
                     &client,
                     &info.owner.mid.to_string(),
                     &info.ugc_season.id.to_string(),
@@ -146,7 +147,9 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
                     None,
                 )
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                group_opt = Some(g);
+                r
             } else {
                 vec![video::resolve_video(&client, &bvid, prefer)
                     .await
@@ -159,7 +162,7 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
                 .await
                 .map_err(|e| e.to_string())?;
             if info.ugc_season.id > 0 {
-                video::resolve_collection(
+                let (r, g) = video::resolve_collection(
                     &client,
                     &info.owner.mid.to_string(),
                     &info.ugc_season.id.to_string(),
@@ -167,16 +170,22 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
                     None,
                 )
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                group_opt = Some(g);
+                r
             } else {
                 vec![video::resolve_video(&client, &info.bvid, prefer)
                     .await
                     .map_err(|e| e.to_string())?]
             }
         }
-        Target::Collection(mid, sid) => video::resolve_collection(&client, &mid, &sid, prefer, None)
-            .await
-            .map_err(|e| e.to_string())?,
+        Target::Collection(mid, sid) => {
+            let (r, g) = video::resolve_collection(&client, &mid, &sid, prefer, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            group_opt = Some(g);
+            r
+        }
         Target::Season(ssid) => video::resolve_season(&client, &ssid, prefer, None)
             .await
             .map_err(|e| e.to_string())?,
@@ -189,7 +198,8 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
             .unwrap_or_else(|| ".".to_string())
     });
 
-    let tasks: Vec<DownloadTask> = DownloadTask::from_resolves(&results, mode, &root);
+    let tasks: Vec<DownloadTask> =
+        DownloadTask::from_resolves(&results, mode, &root, group_opt);
     if tasks.is_empty() {
         return Err("解析成功，但未找到可下载的音视频流".to_string());
     }
@@ -231,7 +241,7 @@ pub async fn bili_resolve_async(
             Target::Bv(_) | Target::Av(_) => 1usize,
             Target::Collection(mid, sid) => {
                 match video::get_collection_bvids(&client, mid, sid).await {
-                    Ok(b) => b.len(),
+                    Ok((b, _)) => b.len(),
                     Err(_) => 0,
                 }
             }
@@ -254,6 +264,7 @@ pub async fn bili_resolve_async(
                 emit_resolve_progress(&app_for_resolve, done, tot, title);
             }));
 
+        let mut group_opt: Option<TaskGroup> = None;
         let result = match &target {
             Target::Bv(bvid) => {
                 // 先取视频详情，判断是否属于合集（ugc_season）
@@ -261,13 +272,13 @@ pub async fn bili_resolve_async(
                     Ok(info) => {
                         if info.ugc_season.id > 0 {
                             // 属于合集：改用合集解析，并更新总数展示
-                            if let Ok(bvids) =
+                            if let Ok((bvids, _)) =
                                 video::get_collection_bvids(&client, &info.owner.mid.to_string(), &info.ugc_season.id.to_string()).await
                             {
                                 total = bvids.len();
                                 emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
                             }
-                            video::resolve_collection(
+                            match video::resolve_collection(
                                 &client,
                                 &info.owner.mid.to_string(),
                                 &info.ugc_season.id.to_string(),
@@ -275,6 +286,13 @@ pub async fn bili_resolve_async(
                                 cb,
                             )
                             .await
+                            {
+                                Ok((r, g)) => {
+                                    group_opt = Some(g);
+                                    Ok(r)
+                                }
+                                Err(e) => Err(e),
+                            }
                         } else {
                             let r = video::resolve_video(&client, bvid, prefer).await;
                             cb.as_ref().map(|f| f(1, 1, bvid));
@@ -288,13 +306,13 @@ pub async fn bili_resolve_async(
                 match video::get_video_info(&client, &bv_from_aid(*aid)).await {
                     Ok(info) => {
                         if info.ugc_season.id > 0 {
-                            if let Ok(bvids) =
+                            if let Ok((bvids, _)) =
                                 video::get_collection_bvids(&client, &info.owner.mid.to_string(), &info.ugc_season.id.to_string()).await
                             {
                                 total = bvids.len();
                                 emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
                             }
-                            video::resolve_collection(
+                            match video::resolve_collection(
                                 &client,
                                 &info.owner.mid.to_string(),
                                 &info.ugc_season.id.to_string(),
@@ -302,6 +320,13 @@ pub async fn bili_resolve_async(
                                 cb,
                             )
                             .await
+                            {
+                                Ok((r, g)) => {
+                                    group_opt = Some(g);
+                                    Ok(r)
+                                }
+                                Err(e) => Err(e),
+                            }
                         } else {
                             let r = video::resolve_video(&client, &info.bvid, prefer).await;
                             cb.as_ref().map(|f| f(1, 1, &info.bvid));
@@ -312,7 +337,13 @@ pub async fn bili_resolve_async(
                 }
             }
             Target::Collection(mid, sid) => {
-                video::resolve_collection(&client, mid, sid, prefer, cb).await
+                match video::resolve_collection(&client, mid, sid, prefer, cb).await {
+                    Ok((r, g)) => {
+                        group_opt = Some(g);
+                        Ok(r)
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Target::Season(ssid) => video::resolve_season(&client, ssid, prefer, cb).await,
         };
@@ -320,7 +351,7 @@ pub async fn bili_resolve_async(
         match result {
             Ok(results) => {
                 let tasks: Vec<DownloadTask> =
-                    DownloadTask::from_resolves(&results, mode, &root);
+                    DownloadTask::from_resolves(&results, mode, &root, group_opt.clone());
                 if tasks.is_empty() {
                     let _ = app_for_cb.emit(
                         "resolve-finished",

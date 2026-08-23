@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -12,6 +12,11 @@ import type { MenuProps } from "ant-design-vue";
 
 type TaskStatus = "Pending" | "Downloading" | "Completed" | "Failed";
 
+interface TaskGroup {
+  id: string;
+  title: string;
+}
+
 interface Task {
   id: string;
   title: string;
@@ -22,6 +27,7 @@ interface Task {
   out_path: string;
   status: TaskStatus;
   error: string | null;
+  group: TaskGroup | null;
 }
 
 interface ProgressEvent {
@@ -63,6 +69,32 @@ const progressMap: Record<string, ProgressEvent> = reactive({});
 const resolveDone = ref(0);
 const resolveTotal = ref(0);
 const resolveCurrent = ref("");
+
+// 任务按合集分组（折叠展示）
+interface TaskGroupView {
+  key: string;
+  title: string;
+  tasks: Task[];
+}
+const groupedTasks = computed<TaskGroupView[]>(() => {
+  const map = new Map<string, TaskGroupView>();
+  for (const t of tasks.value) {
+    const g = t.group;
+    const key = g ? `g:${g.id}` : "single";
+    const title = g ? g.title : "单条视频";
+    if (!map.has(key)) {
+      map.set(key, { key, title, tasks: [] });
+    }
+    map.get(key)!.tasks.push(t);
+  }
+  // 合集组在前，单条视频组在后
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.key === "single") return 1;
+    if (b.key === "single") return -1;
+    return 0;
+  });
+});
+const activeGroupKeys = ref<string[]>(["single"]);
 
 const modeOptions: MenuProps["items"] = [
   { label: "仅音频", value: "audio" },
@@ -189,6 +221,10 @@ onMounted(async () => {
         e.payload.resolved > 0
           ? `解析完成，共 ${e.payload.resolved} 个可下载项`
           : "解析完成";
+      // 解析完成后默认展开所有分组（合集折叠面板）
+      nextTick(() => {
+        activeGroupKeys.value = groupedTasks.value.map((g) => g.key);
+      });
     } else {
       tasks.value = [];
       message.value = e.payload.error || "解析失败";
@@ -287,46 +323,63 @@ onUnmounted(() => {
         />
       </a-card>
 
-      <a-list
-        v-if="tasks.length"
-        class="task-list"
-        item-layout="horizontal"
-        :data-source="tasks"
+      <a-collapse
+        v-if="groupedTasks.length"
+        v-model:activeKey="activeGroupKeys"
+        class="task-collapse"
+        :bordered="false"
       >
-        <template #renderItem="{ item }">
-          <a-list-item>
-            <a-card size="small" :bordered="false" class="task-card">
-              <div class="t-title">
-                {{ item.title
-                }}{{ item.part ? " - " + item.part : "" }}
-              </div>
-              <div class="t-meta">
-                <a-tag :color="statusColor(item.status)">{{ item.status }}</a-tag>
-                <a-tag>{{ item.mode }}</a-tag>
-                <a-tag v-if="progressMap[item.id]" color="blue">下载中</a-tag>
-                <template v-if="progressMap[item.id]">
-                  {{ fmtBytes(progressMap[item.id].downloaded)
-                  }}<template v-if="progressMap[item.id].total">
-                    / {{ fmtBytes(progressMap[item.id].total) }}</template>
-                  · {{ fmtBytes(progressMap[item.id].speed) }}/s
-                </template>
-                <span v-if="item.error" class="err"> · {{ item.error }}</span>
-              </div>
-              <a-progress
-                :percent="
-                  progressMap[item.id]
-                    ? Math.round(progressMap[item.id].percent * 100)
-                    : item.status === 'Completed'
-                    ? 100
-                    : 0
-                "
-                :status="item.status === 'Failed' ? 'exception' : undefined"
-                size="small"
-              />
-            </a-card>
-          </a-list-item>
-        </template>
-      </a-list>
+        <a-collapse-panel v-for="grp in groupedTasks" :key="grp.key">
+          <template #header>
+            <span class="grp-header">
+              <a-tag :color="grp.key === 'single' ? 'default' : 'purple'">
+                {{ grp.key === "single" ? "单条" : "合集" }}
+              </a-tag>
+              <span class="grp-title">{{ grp.title }}</span>
+              <span class="grp-count">（{{ grp.tasks.length }} 项）</span>
+            </span>
+          </template>
+          <a-list
+            class="task-list"
+            item-layout="horizontal"
+            :data-source="grp.tasks"
+          >
+            <template #renderItem="{ item }">
+              <a-list-item>
+                <a-card size="small" :bordered="false" class="task-card">
+                  <div class="t-title">
+                    {{ item.title
+                    }}{{ item.part ? " - " + item.part : "" }}
+                  </div>
+                  <div class="t-meta">
+                    <a-tag :color="statusColor(item.status)">{{ item.status }}</a-tag>
+                    <a-tag>{{ item.mode }}</a-tag>
+                    <a-tag v-if="progressMap[item.id]" color="blue">下载中</a-tag>
+                    <template v-if="progressMap[item.id]">
+                      {{ fmtBytes(progressMap[item.id].downloaded)
+                      }}<template v-if="progressMap[item.id].total">
+                        / {{ fmtBytes(progressMap[item.id].total) }}</template>
+                      · {{ fmtBytes(progressMap[item.id].speed) }}/s
+                    </template>
+                    <span v-if="item.error" class="err"> · {{ item.error }}</span>
+                  </div>
+                  <a-progress
+                    :percent="
+                      progressMap[item.id]
+                        ? Math.round(progressMap[item.id].percent * 100)
+                        : item.status === 'Completed'
+                        ? 100
+                        : 0
+                    "
+                    :status="item.status === 'Failed' ? 'exception' : undefined"
+                    size="small"
+                  />
+                </a-card>
+              </a-list-item>
+            </template>
+          </a-list>
+        </a-collapse-panel>
+      </a-collapse>
     </a-card>
   </div>
 </template>
@@ -372,5 +425,20 @@ onUnmounted(() => {
 }
 .err {
   color: #c00;
+}
+.task-collapse {
+  margin-top: 1rem;
+}
+.grp-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.grp-title {
+  font-weight: 600;
+}
+.grp-count {
+  color: #8a94a6;
+  font-size: 0.8rem;
 }
 </style>

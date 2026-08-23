@@ -5,6 +5,7 @@
 
 use crate::biliapi::client::{BiliClient, BASE_API};
 use crate::biliapi::error::Result;
+use crate::biliapi::task::TaskGroup;
 use crate::biliapi::types;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -161,7 +162,7 @@ pub async fn get_collection_bvids(
     client: &BiliClient,
     mid: &str,
     season_id: &str,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Option<String>)> {
     const PAGE_SIZE: i64 = 30;
 
     // 本地分页结果结构
@@ -171,11 +172,18 @@ pub async fn get_collection_bvids(
         total: i64,
     }
     #[derive(serde::Deserialize, Default)]
+    struct Meta {
+        #[serde(default)]
+        name: String,
+    }
+    #[derive(serde::Deserialize, Default)]
     struct CollData {
         #[serde(default)]
         archives: Vec<Archive>,
         #[serde(default)]
         page: PageMeta,
+        #[serde(default)]
+        meta: Meta,
     }
 
     // 单页请求（避免 reqwest builder 跨 await 借用问题，内联构造）
@@ -244,7 +252,12 @@ pub async fn get_collection_bvids(
     for (_, mut items) in pages {
         bvids.append(&mut items);
     }
-    Ok(bvids)
+    let title = if first.meta.name.is_empty() {
+        None
+    } else {
+        Some(first.meta.name.clone())
+    };
+    Ok((bvids, title))
 }
 
 /// 从单页 archives 过滤出非空 bvid
@@ -330,15 +343,22 @@ pub async fn resolve_video(
 ///
 /// `concurrency` 控制同时解析的视频数（默认 4）；单个视频解析失败立即返回错误。
 /// `on_resolve` 每完成一个视频调用一次（已完成数, 总数, 标题），用于推送解析进度。
+///
+/// 返回解析结果与合集分组信息（`id=season_id`, `title=合集名`），供前端折叠展示。
 pub async fn resolve_collection(
     client: &BiliClient,
     mid: &str,
     season_id: &str,
     prefer_format: i64,
     on_resolve: Option<Arc<dyn Fn(usize, usize, &str) + Send + Sync>>,
-) -> Result<Vec<ResolveResult>> {
-    let bvids = get_collection_bvids(client, mid, season_id).await?;
-    resolve_videos_parallel(client, bvids, prefer_format, on_resolve).await
+) -> Result<(Vec<ResolveResult>, TaskGroup)> {
+    let (bvids, title) = get_collection_bvids(client, mid, season_id).await?;
+    let group = TaskGroup {
+        id: season_id.to_string(),
+        title: title.unwrap_or_else(|| format!("合集 {}", season_id)),
+    };
+    let results = resolve_videos_parallel(client, bvids, prefer_format, on_resolve).await?;
+    Ok((results, group))
 }
 
 /// 并发解析一组 bvid（保持入参顺序返回）
