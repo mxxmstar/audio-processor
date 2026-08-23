@@ -67,6 +67,8 @@ pub struct BiliUserInfo {
 /// 进度事件（推送到前端）
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressEvent {
+    /// 阶段：`resolve`（解析中）/ `download`（下载中）
+    pub phase: String,
     pub task_id: String,
     pub title: String,
     pub status: String,
@@ -75,6 +77,19 @@ pub struct ProgressEvent {
     pub total: u64,
     pub speed: u64,
     pub error: Option<String>,
+}
+
+/// 解析完成事件（带最终任务列表）
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolveFinished {
+    pub ok: bool,
+    /// 解析出的任务列表（失败时为空）
+    pub tasks: Vec<DownloadTask>,
+    /// 失败原因（ok == false 时）
+    pub error: Option<String>,
+    /// 总条目数 / 成功解析数（用于展示「解析 X/Y」）
+    pub total: usize,
+    pub resolved: usize,
 }
 
 fn parse_mode(s: &str) -> DownloadMode {
@@ -129,10 +144,10 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
                 .await
                 .map_err(|e| e.to_string())?]
         }
-        Target::Collection(mid, sid) => video::resolve_collection(&client, &mid, &sid, prefer)
+        Target::Collection(mid, sid) => video::resolve_collection(&client, &mid, &sid, prefer, None)
             .await
             .map_err(|e| e.to_string())?,
-        Target::Season(ssid) => video::resolve_season(&client, &ssid, prefer)
+        Target::Season(ssid) => video::resolve_season(&client, &ssid, prefer, None)
             .await
             .map_err(|e| e.to_string())?,
     };
@@ -151,6 +166,154 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
 
     state.set_tasks(tasks.clone());
     Ok(tasks)
+}
+
+/// 异步解析（后台运行，区分「解析中 / 下载中」两阶段）
+///
+/// 立即返回，解析进度经 `download-progress` 事件推送（`phase = "resolve"`），
+/// 完成后经 `resolve-finished` 事件推送最终任务列表。前端据此区分两阶段。
+#[tauri::command]
+pub async fn bili_resolve_async(
+    input: ResolveInput,
+    app: AppHandle,
+    state: State<'_, BiliState>,
+) -> Result<(), String> {
+    let sessdata = login::load_and_check(state.config_dir_opt().as_deref())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "未登录或登录态已失效，请先扫码登录".to_string())?;
+
+    let mode = parse_mode(input.mode.as_deref().unwrap_or("audio"));
+    let prefer = parse_format(input.prefer_format.as_deref().unwrap_or("1080P"));
+    let client = BiliClient::new(&sessdata);
+    let target = identify(&input.input);
+    let root = input.output_dir.clone().unwrap_or_else(|| {
+        state
+            .config_dir_opt()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string())
+    });
+
+    let app_for_cb = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // 预取条目总数，便于展示「解析 X/Y」
+        let total = match &target {
+            Target::Bv(_) | Target::Av(_) => 1usize,
+            Target::Collection(mid, sid) => {
+                match video::get_collection_bvids(&client, mid, sid).await {
+                    Ok(b) => b.len(),
+                    Err(_) => 0,
+                }
+            }
+            Target::Season(ssid) => match video::get_season_info(&client, None, Some(ssid)).await {
+                Ok(s) => s
+                    .episodes
+                    .iter()
+                    .filter(|ep| !ep.bvid.is_empty() && ep.cid != 0)
+                    .count(),
+                Err(_) => 0,
+            },
+        };
+
+        // 起始进度事件（phase = resolve）
+        emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析…");
+
+        let app_for_resolve = app_for_cb.clone();
+        let cb: Option<Arc<dyn Fn(usize, usize, &str) + Send + Sync>> =
+            Some(Arc::new(move |done: usize, tot: usize, title: &str| {
+                emit_resolve_progress(&app_for_resolve, done, tot, title);
+            }));
+
+        let result = match &target {
+            Target::Bv(bvid) => {
+                let r = video::resolve_video(&client, bvid, prefer).await;
+                cb.as_ref().map(|f| f(1, 1, bvid));
+                r.map(|r| vec![r])
+            }
+            Target::Av(aid) => {
+                match video::get_video_info(&client, &bv_from_aid(*aid)).await {
+                    Ok(info) => {
+                        let r = video::resolve_video(&client, &info.bvid, prefer).await;
+                        cb.as_ref().map(|f| f(1, 1, &info.bvid));
+                        r.map(|r| vec![r])
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Target::Collection(mid, sid) => {
+                video::resolve_collection(&client, mid, sid, prefer, cb).await
+            }
+            Target::Season(ssid) => video::resolve_season(&client, ssid, prefer, cb).await,
+        };
+
+        match result {
+            Ok(results) => {
+                let tasks: Vec<DownloadTask> =
+                    DownloadTask::from_resolves(&results, mode, &root);
+                if tasks.is_empty() {
+                    let _ = app_for_cb.emit(
+                        "resolve-finished",
+                        ResolveFinished {
+                            ok: false,
+                            tasks: vec![],
+                            error: Some("解析成功，但未找到可下载的音视频流".into()),
+                            total: total.max(1),
+                            resolved: 0,
+                        },
+                    );
+                    return;
+                }
+                app_for_cb.state::<BiliState>().set_tasks(tasks.clone());
+                let _ = app_for_cb.emit(
+                    "resolve-finished",
+                    ResolveFinished {
+                        ok: true,
+                        tasks,
+                        error: None,
+                        total: total.max(1),
+                        resolved: results.len(),
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app_for_cb.emit(
+                    "resolve-finished",
+                    ResolveFinished {
+                        ok: false,
+                        tasks: vec![],
+                        error: Some(e.to_string()),
+                        total: total.max(1),
+                        resolved: 0,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// 构造并发送一条「解析中」进度事件（复用 download-progress，phase = "resolve"）
+fn emit_resolve_progress(app: &AppHandle, done: usize, total: usize, title: &str) {
+    let percent = if total > 0 {
+        done as f64 / total as f64
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        "download-progress",
+        ProgressEvent {
+            phase: "resolve".into(),
+            task_id: format!("resolve:{}/{}", done, total),
+            title: title.to_string(),
+            status: if done >= total { "Completed" } else { "Downloading" }.into(),
+            percent,
+            downloaded: 0,
+            total: 0,
+            speed: 0,
+            error: None,
+        },
+    );
 }
 
 /// 输入目标类型
@@ -294,7 +457,11 @@ pub async fn bili_start_download(
     if tasks.is_empty() {
         return Err("没有可下载的任务，请先调用 bili_resolve".to_string());
     }
-    let concurrency = input.concurrency.unwrap_or(3).max(1);
+    // 下载并发度：用户显式指定优先；否则走统一入口（默认 3，受 BILI_CONCURRENCY 覆盖）
+    let concurrency = input
+        .concurrency
+        .unwrap_or_else(|| video::resolve_concurrency(3))
+        .max(1);
     let client = Arc::new(crate::http_client::client::HttpClient::new());
 
     let app_for_cb = app.clone();
@@ -304,6 +471,7 @@ pub async fn bili_start_download(
             let st = app_for_cb.state::<BiliState>();
             st.apply_results(std::slice::from_ref(task));
             let payload = ProgressEvent {
+                phase: "download".into(),
                 task_id: task.id.clone(),
                 title: task.title.clone(),
                 status: status_label(task.status),

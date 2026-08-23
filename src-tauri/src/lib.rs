@@ -42,6 +42,7 @@ pub fn run() {
             commands::delete_history,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
+            commands::bili::bili_resolve_async,
             commands::bili::bili_start_download,
             commands::bili::bili_list_tasks,
             commands::bili::bili_login_qr,

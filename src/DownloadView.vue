@@ -25,6 +25,7 @@ interface Task {
 }
 
 interface ProgressEvent {
+  phase: string; // "resolve" | "download"
   task_id: string;
   title: string;
   status: string;
@@ -33,6 +34,14 @@ interface ProgressEvent {
   total: number;
   speed: number;
   error: string | null;
+}
+
+interface ResolveFinished {
+  ok: boolean;
+  tasks: Task[];
+  error: string | null;
+  total: number;
+  resolved: number;
 }
 
 // 从左侧栏接收登录态（登录态统一在 App.vue 管理）
@@ -49,6 +58,11 @@ const downloading = ref(false);
 const message = ref("");
 
 const progressMap: Record<string, ProgressEvent> = reactive({});
+
+// 解析阶段进度展示（区分「解析中 / 下载中」）
+const resolveDone = ref(0);
+const resolveTotal = ref(0);
+const resolveCurrent = ref("");
 
 const modeOptions: MenuProps["items"] = [
   { label: "仅音频", value: "audio" },
@@ -102,9 +116,9 @@ async function doResolve() {
     return;
   }
   resolving.value = true;
-  message.value = "";
+  message.value = "解析中…";
   try {
-    tasks.value = await invoke<Task[]>("bili_resolve", {
+    await invoke("bili_resolve_async", {
       input: {
         input: inputUrl.value.trim(),
         mode: mode.value,
@@ -112,10 +126,10 @@ async function doResolve() {
         outputDir: outputDir.value || null,
       },
     });
+    // 解析结果经 resolve-finished 事件异步填充；失败也在事件中处理
   } catch (e) {
     message.value = String(e);
     tasks.value = [];
-  } finally {
     resolving.value = false;
   }
 }
@@ -136,10 +150,24 @@ async function doDownload() {
 
 let off1: UnlistenFn | null = null;
 let off2: UnlistenFn | null = null;
+let off3: UnlistenFn | null = null;
 
 onMounted(async () => {
   off1 = await listen<ProgressEvent>("download-progress", (e) => {
-    progressMap[e.payload.task_id] = e.payload;
+    const p = e.payload;
+    if (p.phase === "resolve") {
+      // 解析阶段进度：更新解析中提示
+      const m = /^resolve:(\d+)\/(\d+)$/.exec(p.task_id);
+      if (m) {
+        resolveDone.value = Number(m[1]);
+        resolveTotal.value = Number(m[2]);
+      }
+      resolveCurrent.value = p.title;
+      message.value = `解析中 ${resolveDone.value}/${resolveTotal.value} · ${p.title}`;
+    } else {
+      // 下载阶段进度
+      progressMap[p.task_id] = p;
+    }
   });
   off2 = await listen<{ ok: boolean; failed: number }>(
     "download-finished",
@@ -153,6 +181,25 @@ onMounted(async () => {
         .catch(() => {});
     }
   );
+  off3 = await listen<ResolveFinished>("resolve-finished", (e) => {
+    resolving.value = false;
+    if (e.payload.ok) {
+      tasks.value = e.payload.tasks;
+      message.value =
+        e.payload.resolved > 0
+          ? `解析完成，共 ${e.payload.resolved} 个可下载项`
+          : "解析完成";
+    } else {
+      tasks.value = [];
+      message.value = e.payload.error || "解析失败";
+    }
+  });
+});
+
+onUnmounted(() => {
+  off1?.();
+  off2?.();
+  off3?.();
 });
 
 onUnmounted(() => {
@@ -222,6 +269,24 @@ onUnmounted(() => {
         :message="message"
       />
 
+      <a-card
+        v-if="resolving && resolveTotal > 0"
+        size="small"
+        class="phase-card"
+        :bordered="false"
+      >
+        <div class="phase-title">
+          <a-tag color="processing">解析中</a-tag>
+          已解析 {{ resolveDone }} / {{ resolveTotal }}
+          <span class="phase-cur">· {{ resolveCurrent }}</span>
+        </div>
+        <a-progress
+          :percent="Math.round((resolveDone / resolveTotal) * 100)"
+          status="active"
+          size="small"
+        />
+      </a-card>
+
       <a-list
         v-if="tasks.length"
         class="task-list"
@@ -238,6 +303,7 @@ onUnmounted(() => {
               <div class="t-meta">
                 <a-tag :color="statusColor(item.status)">{{ item.status }}</a-tag>
                 <a-tag>{{ item.mode }}</a-tag>
+                <a-tag v-if="progressMap[item.id]" color="blue">下载中</a-tag>
                 <template v-if="progressMap[item.id]">
                   {{ fmtBytes(progressMap[item.id].downloaded)
                   }}<template v-if="progressMap[item.id].total">
@@ -276,6 +342,18 @@ onUnmounted(() => {
 }
 .msg {
   margin: 1rem 0;
+}
+.phase-card {
+  margin: 1rem 0;
+  background: #f0f7ff;
+}
+.phase-title {
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+.phase-cur {
+  color: #555;
+  font-weight: 400;
 }
 .task-list {
   margin-top: 1rem;
