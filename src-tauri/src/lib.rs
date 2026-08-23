@@ -44,6 +44,8 @@ pub fn run() {
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,
             commands::bili::bili_start_download,
+            commands::bili::bili_pause_download,
+            commands::bili::bili_stop_download,
             commands::bili::bili_list_tasks,
             commands::bili::bili_login_qr,
             commands::bili::bili_login_poll,

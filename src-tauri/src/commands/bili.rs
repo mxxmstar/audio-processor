@@ -615,6 +615,9 @@ pub async fn bili_start_download(
         .max(1);
     let client = Arc::new(crate::http_client::client::HttpClient::new());
 
+    // 每次启动下载前重置控制句柄（清空上一次的暂停/停止信号）
+    let control = state.reset_download_control();
+
     let app_for_cb = app.clone();
     let prog_cb: Option<Arc<dyn Fn(&DownloadTask, crate::http_client::types::Progress) + Send + Sync>> =
         Some(Arc::new(move |task: &DownloadTask, p: crate::http_client::types::Progress| {
@@ -644,7 +647,7 @@ pub async fn bili_start_download(
     }
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        let results = crate::biliapi::task::run_batch(client, &mut tasks_ref, concurrency, prog_cb).await;
+        let results = crate::biliapi::task::run_batch(client, &mut tasks_ref, concurrency, prog_cb, Some(&control)).await;
         let failed: Vec<_> = results.iter().enumerate().filter(|(_, r)| r.is_err()).collect();
 
         // 下载完成后写入通用历史库（每条任务一条，含最终状态/错误）
@@ -672,6 +675,23 @@ pub async fn bili_start_download(
     });
 
     Ok(tasks.iter().map(|t| t.id.clone()).collect())
+}
+
+/// 暂停下载：置位暂停信号，进行中的任务在完成当前文件后进入 `Paused`（保留已下载部分，可续传）。
+#[tauri::command]
+pub fn bili_pause_download(state: State<'_, BiliState>) -> Result<(), String> {
+    state.pause_download();
+    Ok(())
+}
+
+/// 停止下载：置位停止信号，立即中断下载并删除已下载部分（状态置 `Cancelled`）。
+#[tauri::command]
+pub fn bili_stop_download(app: AppHandle, state: State<'_, BiliState>) -> Result<(), String> {
+    state.stop_download();
+    // 立即回写任务状态快照（被取消的任务在 run_batch 收尾前可能仍是旧状态），
+    // 让前端即时感知「取消中」。最终状态由后台任务收尾时经事件推送。
+    let _ = app.emit("download-control", serde_json::json!({ "action": "stop" }));
+    Ok(())
 }
 
 /// 查询当前任务列表与状态
@@ -779,6 +799,8 @@ fn status_label(s: crate::biliapi::task::DownloadStatus) -> String {
         DownloadStatus::Downloading => "下载中",
         DownloadStatus::Completed => "已完成",
         DownloadStatus::Failed => "失败",
+        DownloadStatus::Paused => "已暂停",
+        DownloadStatus::Cancelled => "已停止",
     }
     .to_string()
 }

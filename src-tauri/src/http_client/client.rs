@@ -1,9 +1,16 @@
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use super::error::HttpClientError;
 use super::types::{CallbackInfo, HttpMethod, Progress, RequestConfig, HttpResponse};
+
+/// 下载取消信号。
+///
+/// 传入 `None` 表示不检查取消；传入 `Some(Arc<AtomicBool>)` 时，
+/// 若某刻该 bool 被置位，下载循环会立即中断并以 `Err(Cancelled)` 返回。
+pub type CancelSignal = Option<Arc<AtomicBool>>;
 
 /// HTTP 客户端
 ///
@@ -298,35 +305,46 @@ impl HttpClient {
     /// 使用 `reqwest` 的 chunked 流边下边写，避免将整个文件读入内存。
     /// 通过 `on_progress` 回调（节流约 200ms）上报下载进度。
     ///
+    /// 下载取消信号。
+    ///
+    /// 传入 `None` 表示不检查取消；传入 `Some(Arc<AtomicBool>)` 时，
+    /// 若某刻该 bool 被置位，下载循环会立即中断并以 `Err(Cancelled)` 返回。
+
     /// # 参数
     /// * `url` - 直链地址（B 站 DASH 流需带 `Referer`/`User-Agent`，见 `download_with_config`）
     /// * `path` - 目标文件路径
     /// * `on_progress` - 进度回调（可选）
+    /// * `cancel` - 取消信号（可选）
     ///
     /// # 示例
     /// ```ignore
-    /// client.download_to_file(&url, "video.m4s", None).await?;
+    /// client.download_to_file(&url, "video.m4s", None, None).await?;
     /// ```
     pub async fn download_to_file(
         &self,
         url: &str,
         path: &str,
         on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
+        cancel: CancelSignal,
     ) -> Result<(), HttpClientError> {
         self.download_with_config(
             RequestConfig::new(url).header("Referer", "https://www.bilibili.com"),
             path,
             on_progress,
+            cancel,
         )
         .await
     }
 
     /// 带自定义请求配置的流式下载（可附加 header / 重试 / Range 断点续传）
+    ///
+    /// `cancel` 为取消信号：循环中每收到一个 chunk 都会检查，一旦置位立即中断并返回 `Err(Cancelled)`。
     pub async fn download_with_config(
         &self,
         config: RequestConfig,
         path: &str,
         on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
+        cancel: CancelSignal,
     ) -> Result<(), HttpClientError> {
         use futures_util::StreamExt;
         use tokio::io::AsyncWriteExt;
@@ -383,6 +401,15 @@ impl HttpClient {
         let mut last_downloaded: u64 = resume_from;
 
         while let Some(chunk) = stream.next().await {
+            // 取消信号检查：一旦置位立即中断
+            if let Some(ref c) = cancel {
+                if c.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(HttpClientError::Cancelled(format!(
+                        "下载被取消: {} (已下载 {} bytes)",
+                        path, downloaded
+                    )));
+                }
+            }
             let chunk = chunk.map_err(|e| {
                 HttpClientError::ResponseParseError(format!("流读取失败: {}", e))
             })?;
@@ -533,7 +560,7 @@ mod tests {
         let path = tmp.to_string_lossy().to_string();
 
         let client = HttpClient::new();
-        let result = client.download_to_file(&url, &path, None).await;
+        let result = client.download_to_file(&url, &path, None, None).await;
         assert!(result.is_ok(), "下载应成功: {:?}", result.err());
 
         let written = std::fs::read(&path).unwrap();
@@ -558,7 +585,7 @@ mod tests {
                 if p.percent > 0.0 {
                     calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            })))
+            })), None)
             .await;
         assert!(result.is_ok());
         assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 1, "进度回调应至少触发一次（结尾 100%）");

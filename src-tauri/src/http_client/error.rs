@@ -32,6 +32,10 @@ pub enum HttpClientError {
     #[error("其他错误: {0}")]
     OtherError(String),
 
+    /// 下载被取消（暂停 / 停止）
+    #[error("下载已取消: {0}")]
+    Cancelled(String),
+
 }
 
 impl From<reqwest::Error> for HttpClientError {

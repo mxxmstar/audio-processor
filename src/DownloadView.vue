@@ -10,7 +10,7 @@ import {
 } from "@ant-design/icons-vue";
 import type { MenuProps } from "ant-design-vue";
 
-type TaskStatus = "Pending" | "Downloading" | "Completed" | "Failed";
+type TaskStatus = "Pending" | "Downloading" | "Completed" | "Failed" | "Paused" | "Cancelled";
 
 interface TaskGroup {
   id: string;
@@ -118,8 +118,31 @@ function statusColor(s: TaskStatus): string {
       return "error";
     case "Downloading":
       return "processing";
+    case "Paused":
+      return "warning";
+    case "Cancelled":
+      return "error";
     default:
       return "default";
+  }
+}
+
+function statusText(s: TaskStatus): string {
+  switch (s) {
+    case "Pending":
+      return "等待中";
+    case "Downloading":
+      return "下载中";
+    case "Completed":
+      return "已完成";
+    case "Failed":
+      return "失败";
+    case "Paused":
+      return "已暂停";
+    case "Cancelled":
+      return "已停止";
+    default:
+      return s;
   }
 }
 
@@ -177,6 +200,24 @@ async function doDownload() {
   } catch (e) {
     message.value = String(e);
     downloading.value = false;
+  }
+}
+
+async function doPause() {
+  try {
+    await invoke("bili_pause_download");
+    message.value = "已发送暂停请求，下载完成后将暂停（可续传）";
+  } catch (e) {
+    message.value = String(e);
+  }
+}
+
+async function doStop() {
+  try {
+    await invoke("bili_stop_download");
+    message.value = "已发送停止请求，将删除已下载部分";
+  } catch (e) {
+    message.value = String(e);
   }
 }
 
@@ -294,6 +335,19 @@ onUnmounted(() => {
             <template #icon><DownloadOutlined /></template>
             {{ downloading ? "下载中…" : "开始下载" }}
           </a-button>
+          <a-button
+            danger
+            :disabled="!downloading"
+            @click="doStop"
+          >
+            停止下载
+          </a-button>
+          <a-button
+            :disabled="!downloading"
+            @click="doPause"
+          >
+            暂停下载
+          </a-button>
         </a-space>
       </a-form>
 
@@ -352,10 +406,10 @@ onUnmounted(() => {
                     }}{{ item.part ? " - " + item.part : "" }}
                   </div>
                   <div class="t-meta">
-                    <a-tag :color="statusColor(item.status)">{{ item.status }}</a-tag>
+                    <a-tag :color="statusColor(item.status)">{{ statusText(item.status) }}</a-tag>
                     <a-tag>{{ item.mode }}</a-tag>
-                    <a-tag v-if="progressMap[item.id]" color="blue">下载中</a-tag>
-                    <template v-if="progressMap[item.id]">
+                    <a-tag v-if="progressMap[item.id] && item.status === 'Downloading'" color="blue">下载中</a-tag>
+                    <template v-if="progressMap[item.id] && item.status === 'Downloading'">
                       {{ fmtBytes(progressMap[item.id].downloaded)
                       }}<template v-if="progressMap[item.id].total">
                         / {{ fmtBytes(progressMap[item.id].total) }}</template>
@@ -371,7 +425,15 @@ onUnmounted(() => {
                         ? 100
                         : 0
                     "
-                    :status="item.status === 'Failed' ? 'exception' : undefined"
+                    :status="
+                      item.status === 'Failed'
+                        ? 'exception'
+                        : item.status === 'Paused'
+                        ? 'normal'
+                        : item.status === 'Cancelled'
+                        ? 'exception'
+                        : undefined
+                    "
                     size="small"
                   />
                 </a-card>

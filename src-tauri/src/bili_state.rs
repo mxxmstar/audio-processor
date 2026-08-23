@@ -8,7 +8,7 @@
 //! 这样后台 `tokio` 任务中的进度回调可以把状态 `move` 进去（要求 `'static`），
 //! 同时满足 Tauri `State` 的 `Send + Sync`。
 
-use crate::biliapi::task::DownloadTask;
+use crate::biliapi::task::{DownloadControl, DownloadTask};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +18,8 @@ struct Inner {
     config_dir: Mutex<Option<PathBuf>>,
     /// 当前任务列表（含状态/进度/错误）
     tasks: Mutex<Vec<DownloadTask>>,
+    /// 下载控制句柄（暂停 / 停止信号）。每次启动下载时重建。
+    control: Mutex<DownloadControl>,
 }
 
 #[derive(Default, Clone)]
@@ -59,5 +61,35 @@ impl BiliState {
                 slot.error = u.error.clone();
             }
         }
+    }
+
+    /// 获取当前的下载控制句柄（用于启动下载时传递给 run_batch）。
+    pub fn download_control(&self) -> DownloadControl {
+        self.inner.control.lock().unwrap().clone()
+    }
+
+    /// 重置（重建）下载控制句柄。在启动一次新下载前调用，
+    /// 确保上一轮 pause/stop 信号已被清空。
+    pub fn reset_download_control(&self) -> DownloadControl {
+        let ctrl = DownloadControl::default();
+        *self.inner.control.lock().unwrap() = ctrl.clone();
+        ctrl
+    }
+
+    /// 置位暂停信号：当前进行中的任务下载完当前文件后进入 `Paused`（保留部分）。
+    pub fn pause_download(&self) {
+        self.inner
+            .control
+            .lock()
+            .unwrap()
+            .pause
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 置位停止信号：立即中断并删除已下载部分，状态置 `Cancelled`。
+    pub fn stop_download(&self) {
+        let g = self.inner.control.lock().unwrap();
+        g.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        g.pause.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }

@@ -12,6 +12,7 @@ use crate::biliapi::error::BiliApiError;
 use crate::biliapi::media;
 use crate::biliapi::video::{PageStream, ResolveResult};
 use crate::http_client::client::HttpClient;
+use crate::http_client::error::HttpClientError;
 use crate::http_client::types::Progress as DlProgress;
 use std::path::Path;
 use std::sync::Arc;
@@ -35,6 +36,20 @@ pub enum DownloadStatus {
     Downloading,
     Completed,
     Failed,
+    /// 已暂停（保留已下载部分，可断点续传）
+    Paused,
+    /// 已停止（已删除已下载部分）
+    Cancelled,
+}
+
+/// 下载控制句柄：通过 `Arc<AtomicBool>` 信号实现暂停 / 停止。
+///
+/// - `pause` 置位：当前任务下载完成后进入 `Paused`，保留已下载文件，可续传。
+/// - `stop` 置位：立即中断下载并删除已下载部分，状态置为 `Cancelled`。
+#[derive(Clone, Default)]
+pub struct DownloadControl {
+    pub pause: Arc<std::sync::atomic::AtomicBool>,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 合集/系列分组信息（用于前端折叠展示）
@@ -155,10 +170,15 @@ fn sanitize(name: &str) -> String {
 /// - `AudioOnly`：下音频 → `<title>.m4a`
 /// - `VideoOnly`：下视频 → `<title>.mp4`
 /// - `Merge`：下音 + 视频 → ffmpeg 合并 `<title>.mp4`；若 ffmpeg 不可用则回退为仅下载音/视频并标记提示
+///
+/// `control` 为可选取消控制：
+/// - `control.stop` 置位 → 立即中断，删除已下载部分，返回 `Err`，由调用方置 `Cancelled`。
+/// - `control.pause` 置位 → 当前文件下载完成后停止，保留已下载部分，置 `Paused`。
 pub async fn run_task(
     client: &HttpClient,
     task: &mut DownloadTask,
     on_progress: Option<Arc<dyn Fn(&DownloadTask, DlProgress) + Send + Sync>>,
+    control: Option<&DownloadControl>,
 ) -> Result<(), BiliApiError> {
     task.status = DownloadStatus::Downloading;
     let dir = Path::new(&task.output_dir);
@@ -171,6 +191,11 @@ pub async fn run_task(
     let prog_cb: Option<Arc<dyn Fn(DlProgress) + Send + Sync>> = on_progress
         .map(|f| Arc::new(move |p: DlProgress| f(&snapshot, p)) as Arc<dyn Fn(DlProgress) + Send + Sync>);
 
+    // 停止信号：优先于暂停，立即中断并删除已下载部分
+    let stop = control.map(|c| c.stop.clone());
+    // 暂停信号：当前文件下完即停，保留部分
+    let pause = control.map(|c| c.pause.clone());
+
     match task.mode {
         DownloadMode::AudioOnly => {
             let audio = match &task.audio_url {
@@ -182,10 +207,32 @@ pub async fn run_task(
                 }
             };
             let out = dir.join(format!("{}.m4a", base));
-            client
-                .download_to_file(audio, out.to_str().unwrap(), prog_cb.clone())
+            match client
+                .download_to_file(audio, out.to_str().unwrap(), prog_cb.clone(), stop.clone())
                 .await
-                .map_err(|e| BiliApiError::Other(format!("音频下载失败: {}", e)))?;
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    // 若是取消信号触发的 Cancelled → 删除文件并置状态；否则视为失败
+                    if matches!(e, HttpClientError::Cancelled(_)) {
+                        let _ = std::fs::remove_file(&out);
+                        task.status = DownloadStatus::Cancelled;
+                        task.error = Some("已停止（已删除已下载部分）".into());
+                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    }
+                    task.status = DownloadStatus::Failed;
+                    task.error = Some(format!("音频下载失败: {}", e));
+                    return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                }
+            }
+            // 暂停：保留已下载部分
+            if let Some(ref p) = pause {
+                if p.load(std::sync::atomic::Ordering::SeqCst) {
+                    task.status = DownloadStatus::Paused;
+                    task.error = Some("已暂停（可续传）".into());
+                    return Ok(());
+                }
+            }
         }
         DownloadMode::VideoOnly => {
             let video = match &task.video_url {
@@ -197,10 +244,30 @@ pub async fn run_task(
                 }
             };
             let out = dir.join(format!("{}.mp4", base));
-            client
-                .download_to_file(video, out.to_str().unwrap(), prog_cb.clone())
+            match client
+                .download_to_file(video, out.to_str().unwrap(), prog_cb.clone(), stop.clone())
                 .await
-                .map_err(|e| BiliApiError::Other(format!("视频下载失败: {}", e)))?;
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    if matches!(e, HttpClientError::Cancelled(_)) {
+                        let _ = std::fs::remove_file(&out);
+                        task.status = DownloadStatus::Cancelled;
+                        task.error = Some("已停止（已删除已下载部分）".into());
+                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    }
+                    task.status = DownloadStatus::Failed;
+                    task.error = Some(format!("视频下载失败: {}", e));
+                    return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                }
+            }
+            if let Some(ref p) = pause {
+                if p.load(std::sync::atomic::Ordering::SeqCst) {
+                    task.status = DownloadStatus::Paused;
+                    task.error = Some("已暂停（可续传）".into());
+                    return Ok(());
+                }
+            }
         }
         DownloadMode::Merge => {
             println!(
@@ -228,14 +295,40 @@ pub async fn run_task(
                 println!("[task] ffmpeg 不可用 -> 走回退分支（分别下载音/视频）");
                 let vout = dir.join(format!("{}.video.mp4", base));
                 let aout = dir.join(format!("{}.audio.m4a", base));
-                client
-                    .download_to_file(video, vout.to_str().unwrap(), prog_cb.clone())
+                match client
+                    .download_to_file(video, vout.to_str().unwrap(), prog_cb.clone(), stop.clone())
                     .await
-                    .map_err(|e| BiliApiError::Other(format!("视频下载失败: {}", e)))?;
-                client
-                    .download_to_file(&audio, aout.to_str().unwrap(), None)
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if matches!(e, HttpClientError::Cancelled(_)) {
+                            let _ = std::fs::remove_file(&vout);
+                            task.status = DownloadStatus::Cancelled;
+                            task.error = Some("已停止（已删除已下载部分）".into());
+                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        }
+                        task.status = DownloadStatus::Failed;
+                        task.error = Some(format!("视频下载失败: {}", e));
+                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    }
+                }
+                match client
+                    .download_to_file(&audio, aout.to_str().unwrap(), None, stop.clone())
                     .await
-                    .map_err(|e| BiliApiError::Other(format!("音频下载失败: {}", e)))?;
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if matches!(e, HttpClientError::Cancelled(_)) {
+                            let _ = std::fs::remove_file(&aout);
+                            task.status = DownloadStatus::Cancelled;
+                            task.error = Some("已停止（已删除已下载部分）".into());
+                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        }
+                        task.status = DownloadStatus::Failed;
+                        task.error = Some(format!("音频下载失败: {}", e));
+                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    }
+                }
                 task.error = Some("ffmpeg 不可用，已分别下载音/视频，请手动合并".into());
                 task.status = DownloadStatus::Completed;
                 return Ok(());
@@ -244,14 +337,40 @@ pub async fn run_task(
             let atmp = dir.join(format!("{}.audio.m4a", base));
             let out = dir.join(format!("{}.mp4", base));
             println!("[task] ffmpeg 可用 -> 准备合并，输出: {}", out.display());
-            client
-                .download_to_file(video, vtmp.to_str().unwrap(), prog_cb.clone())
+            match client
+                .download_to_file(video, vtmp.to_str().unwrap(), prog_cb.clone(), stop.clone())
                 .await
-                .map_err(|e| BiliApiError::Other(format!("视频下载失败: {}", e)))?;
-            client
-                .download_to_file(&audio, atmp.to_str().unwrap(), None)
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    if matches!(e, HttpClientError::Cancelled(_)) {
+                        let _ = std::fs::remove_file(&vtmp);
+                        task.status = DownloadStatus::Cancelled;
+                        task.error = Some("已停止（已删除已下载部分）".into());
+                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    }
+                    task.status = DownloadStatus::Failed;
+                    task.error = Some(format!("视频下载失败: {}", e));
+                    return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                }
+            }
+            match client
+                .download_to_file(&audio, atmp.to_str().unwrap(), None, stop.clone())
                 .await
-                .map_err(|e| BiliApiError::Other(format!("音频下载失败: {}", e)))?;
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    if matches!(e, HttpClientError::Cancelled(_)) {
+                        let _ = std::fs::remove_file(&atmp);
+                        task.status = DownloadStatus::Cancelled;
+                        task.error = Some("已停止（已删除已下载部分）".into());
+                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    }
+                    task.status = DownloadStatus::Failed;
+                    task.error = Some(format!("音频下载失败: {}", e));
+                    return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                }
+            }
             media::merge(
                 vtmp.to_str().unwrap(),
                 atmp.to_str().unwrap(),
@@ -272,11 +391,13 @@ pub async fn run_task(
 ///
 /// 返回每个任务的执行结果（`Err` 表示失败），单个失败不影响其他任务。
 /// `on_progress` 需为 `Arc` 包裹的闭包以满足 `'static`（跨任务线程共享）。
+/// `control` 为可选取消控制（暂停 / 停止），传给每个 `run_task`。
 pub async fn run_batch(
     client: Arc<HttpClient>,
     tasks: &mut [DownloadTask],
     concurrency: usize,
     on_progress: Option<Arc<dyn Fn(&DownloadTask, DlProgress) + Send + Sync>>,
+    control: Option<&DownloadControl>,
 ) -> Vec<Result<(), BiliApiError>> {
     let sem = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut handles = Vec::new();
@@ -286,12 +407,13 @@ pub async fn run_batch(
         let client = client.clone();
         let mut task = tasks[idx].clone();
         let cb = on_progress.clone();
+        let ctrl = control.cloned();
         let handle = tokio::spawn(async move {
             let res = match &cb {
                 Some(arc_cb) => {
-                    run_task(&client, &mut task, Some(arc_cb.clone())).await
+                    run_task(&client, &mut task, Some(arc_cb.clone()), ctrl.as_ref()).await
                 }
-                None => run_task(&client, &mut task, None).await,
+                None => run_task(&client, &mut task, None, ctrl.as_ref()).await,
             };
             drop(permit);
             (idx, task, res)
