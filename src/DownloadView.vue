@@ -206,7 +206,7 @@ async function doDownload() {
 async function doPause() {
   try {
     await invoke("bili_pause_download");
-    message.value = "已发送暂停请求，下载完成后将暂停（可续传）";
+    message.value = "已发送暂停请求，当前任务下载完成后将暂停（可续传）";
   } catch (e) {
     message.value = String(e);
   }
@@ -215,7 +215,9 @@ async function doPause() {
 async function doStop() {
   try {
     await invoke("bili_stop_download");
-    message.value = "已发送停止请求，将删除已下载部分";
+    // 立即复位下载按钮（后台仍在收尾取消其余任务，但本轮交互已结束）
+    downloading.value = false;
+    message.value = "已停止下载，已删除已下载部分";
   } catch (e) {
     message.value = String(e);
   }
@@ -238,9 +240,15 @@ onMounted(async () => {
       resolveCurrent.value = p.title;
       message.value = `解析中 ${resolveDone.value}/${resolveTotal.value} · ${p.title}`;
     } else {
-      // 下载阶段进度：无条件写入进度表。
-      // 停止/暂停后的残留由 download-finished 事件统一清空（已取消任务仍会触发该事件）。
+      // 下载阶段进度。后端此时会携带任务的真实枚举状态（如
+      // "Downloading" / "Cancelled" / "Paused" / "Completed"），
+      // 据此实时更新对应任务的状态展示，并在终态时清除进度表项。
       progressMap[p.task_id] = p;
+      const t = tasks.value.find((x) => x.id === p.task_id);
+      if (t) t.status = p.status as TaskStatus;
+      if (p.status !== "Downloading") {
+        delete progressMap[p.task_id];
+      }
     }
   });
   off2 = await listen<{ ok: boolean; failed: number }>(

@@ -628,7 +628,9 @@ pub async fn bili_start_download(
                 phase: "download".into(),
                 task_id: task.id.clone(),
                 title: task.title.clone(),
-                status: status_label(task.status),
+                // 使用枚举名（如 "Downloading"/"Cancelled"/"Paused"），
+                // 便于前端按真实状态实时更新任务展示（与 tasks 列表的 status 字段一致）。
+                status: format!("{:?}", task.status),
                 percent: p.percent,
                 downloaded: p.downloaded,
                 total: p.total.unwrap_or(0),

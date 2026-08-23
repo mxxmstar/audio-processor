@@ -326,25 +326,30 @@ impl HttpClient {
         path: &str,
         on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
         cancel: CancelSignal,
+        pause: CancelSignal,
     ) -> Result<(), HttpClientError> {
         self.download_with_config(
             RequestConfig::new(url).header("Referer", "https://www.bilibili.com"),
             path,
             on_progress,
             cancel,
+            pause,
         )
         .await
     }
 
     /// 带自定义请求配置的流式下载（可附加 header / 重试 / Range 断点续传）
     ///
-    /// `cancel` 为取消信号：循环中每收到一个 chunk 都会检查，一旦置位立即中断并返回 `Err(Cancelled)`。
+    /// - `cancel` 为停止信号：置位立即中断并返回 `Err(Cancelled("stop:..."))`（调用方据此删除文件）。
+    /// - `pause` 为暂停信号：置位中断并返回 `Err(Cancelled("pause:..."))`（调用方据此保留文件，标记为可续传）。
+    /// 循环中每收到一个 chunk 都会检查这两个信号。
     pub async fn download_with_config(
         &self,
         config: RequestConfig,
         path: &str,
         on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
         cancel: CancelSignal,
+        pause: CancelSignal,
     ) -> Result<(), HttpClientError> {
         use futures_util::StreamExt;
         use tokio::io::AsyncWriteExt;
@@ -401,11 +406,20 @@ impl HttpClient {
         let mut last_downloaded: u64 = resume_from;
 
         while let Some(chunk) = stream.next().await {
-            // 取消信号检查：一旦置位立即中断
+            // 停止信号优先：一旦置位立即中断（调用方会删除已下载部分）
             if let Some(ref c) = cancel {
                 if c.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err(HttpClientError::Cancelled(format!(
-                        "下载被取消: {} (已下载 {} bytes)",
+                        "stop: {} (已下载 {} bytes)",
+                        path, downloaded
+                    )));
+                }
+            }
+            // 暂停信号：置位中断并保留已下载部分（调用方标记为可续传）
+            if let Some(ref c) = pause {
+                if c.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(HttpClientError::Cancelled(format!(
+                        "pause: {} (已下载 {} bytes)",
                         path, downloaded
                     )));
                 }
@@ -560,7 +574,7 @@ mod tests {
         let path = tmp.to_string_lossy().to_string();
 
         let client = HttpClient::new();
-        let result = client.download_to_file(&url, &path, None, None).await;
+        let result = client.download_to_file(&url, &path, None, None, None).await;
         assert!(result.is_ok(), "下载应成功: {:?}", result.err());
 
         let written = std::fs::read(&path).unwrap();
@@ -585,7 +599,7 @@ mod tests {
                 if p.percent > 0.0 {
                     calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            })), None)
+            })), None, None)
             .await;
         assert!(result.is_ok());
         assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 1, "进度回调应至少触发一次（结尾 100%）");

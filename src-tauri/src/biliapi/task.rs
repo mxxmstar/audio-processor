@@ -208,29 +208,35 @@ pub async fn run_task(
             };
             let out = dir.join(format!("{}.m4a", base));
             match client
-                .download_to_file(audio, out.to_str().unwrap(), prog_cb.clone(), stop.clone())
+                .download_to_file(
+                    audio,
+                    out.to_str().unwrap(),
+                    prog_cb.clone(),
+                    stop.clone(),
+                    pause.clone(),
+                )
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
-                    // 若是取消信号触发的 Cancelled → 删除文件并置状态；否则视为失败
-                    if matches!(e, HttpClientError::Cancelled(_)) {
-                        let _ = std::fs::remove_file(&out);
-                        task.status = DownloadStatus::Cancelled;
-                        task.error = Some("已停止（已删除已下载部分）".into());
-                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    // 取消信号（stop/pause）触发：按信号类型分别处理
+                    if let HttpClientError::Cancelled(ref msg) = e {
+                        if msg.starts_with("pause:") {
+                            // 暂停：保留已下载部分，标记可续传
+                            task.status = DownloadStatus::Paused;
+                            task.error = Some("已暂停（可续传）".into());
+                            return Ok(());
+                        } else {
+                            // 停止：删除已下载部分
+                            let _ = std::fs::remove_file(&out);
+                            task.status = DownloadStatus::Cancelled;
+                            task.error = Some("已停止（已删除已下载部分）".into());
+                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        }
                     }
                     task.status = DownloadStatus::Failed;
                     task.error = Some(format!("音频下载失败: {}", e));
                     return Err(BiliApiError::Other(task.error.clone().unwrap()));
-                }
-            }
-            // 暂停：保留已下载部分
-            if let Some(ref p) = pause {
-                if p.load(std::sync::atomic::Ordering::SeqCst) {
-                    task.status = DownloadStatus::Paused;
-                    task.error = Some("已暂停（可续传）".into());
-                    return Ok(());
                 }
             }
         }
@@ -245,27 +251,32 @@ pub async fn run_task(
             };
             let out = dir.join(format!("{}.mp4", base));
             match client
-                .download_to_file(video, out.to_str().unwrap(), prog_cb.clone(), stop.clone())
+                .download_to_file(
+                    video,
+                    out.to_str().unwrap(),
+                    prog_cb.clone(),
+                    stop.clone(),
+                    pause.clone(),
+                )
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
-                    if matches!(e, HttpClientError::Cancelled(_)) {
-                        let _ = std::fs::remove_file(&out);
-                        task.status = DownloadStatus::Cancelled;
-                        task.error = Some("已停止（已删除已下载部分）".into());
-                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    if let HttpClientError::Cancelled(ref msg) = e {
+                        if msg.starts_with("pause:") {
+                            task.status = DownloadStatus::Paused;
+                            task.error = Some("已暂停（可续传）".into());
+                            return Ok(());
+                        } else {
+                            let _ = std::fs::remove_file(&out);
+                            task.status = DownloadStatus::Cancelled;
+                            task.error = Some("已停止（已删除已下载部分）".into());
+                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        }
                     }
                     task.status = DownloadStatus::Failed;
                     task.error = Some(format!("视频下载失败: {}", e));
                     return Err(BiliApiError::Other(task.error.clone().unwrap()));
-                }
-            }
-            if let Some(ref p) = pause {
-                if p.load(std::sync::atomic::Ordering::SeqCst) {
-                    task.status = DownloadStatus::Paused;
-                    task.error = Some("已暂停（可续传）".into());
-                    return Ok(());
                 }
             }
         }
@@ -296,16 +307,28 @@ pub async fn run_task(
                 let vout = dir.join(format!("{}.video.mp4", base));
                 let aout = dir.join(format!("{}.audio.m4a", base));
                 match client
-                    .download_to_file(video, vout.to_str().unwrap(), prog_cb.clone(), stop.clone())
+                    .download_to_file(
+                        video,
+                        vout.to_str().unwrap(),
+                        prog_cb.clone(),
+                        stop.clone(),
+                        pause.clone(),
+                    )
                     .await
                 {
                     Ok(()) => {}
                     Err(e) => {
-                        if matches!(e, HttpClientError::Cancelled(_)) {
-                            let _ = std::fs::remove_file(&vout);
-                            task.status = DownloadStatus::Cancelled;
-                            task.error = Some("已停止（已删除已下载部分）".into());
-                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        if let HttpClientError::Cancelled(ref msg) = e {
+                            if msg.starts_with("pause:") {
+                                task.status = DownloadStatus::Paused;
+                                task.error = Some("已暂停（可续传）".into());
+                                return Ok(());
+                            } else {
+                                let _ = std::fs::remove_file(&vout);
+                                task.status = DownloadStatus::Cancelled;
+                                task.error = Some("已停止（已删除已下载部分）".into());
+                                return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                            }
                         }
                         task.status = DownloadStatus::Failed;
                         task.error = Some(format!("视频下载失败: {}", e));
@@ -313,16 +336,22 @@ pub async fn run_task(
                     }
                 }
                 match client
-                    .download_to_file(&audio, aout.to_str().unwrap(), None, stop.clone())
+                    .download_to_file(&audio, aout.to_str().unwrap(), None, stop.clone(), pause.clone())
                     .await
                 {
                     Ok(()) => {}
                     Err(e) => {
-                        if matches!(e, HttpClientError::Cancelled(_)) {
-                            let _ = std::fs::remove_file(&aout);
-                            task.status = DownloadStatus::Cancelled;
-                            task.error = Some("已停止（已删除已下载部分）".into());
-                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        if let HttpClientError::Cancelled(ref msg) = e {
+                            if msg.starts_with("pause:") {
+                                task.status = DownloadStatus::Paused;
+                                task.error = Some("已暂停（可续传）".into());
+                                return Ok(());
+                            } else {
+                                let _ = std::fs::remove_file(&aout);
+                                task.status = DownloadStatus::Cancelled;
+                                task.error = Some("已停止（已删除已下载部分）".into());
+                                return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                            }
                         }
                         task.status = DownloadStatus::Failed;
                         task.error = Some(format!("音频下载失败: {}", e));
@@ -338,16 +367,28 @@ pub async fn run_task(
             let out = dir.join(format!("{}.mp4", base));
             println!("[task] ffmpeg 可用 -> 准备合并，输出: {}", out.display());
             match client
-                .download_to_file(video, vtmp.to_str().unwrap(), prog_cb.clone(), stop.clone())
+                .download_to_file(
+                    video,
+                    vtmp.to_str().unwrap(),
+                    prog_cb.clone(),
+                    stop.clone(),
+                    pause.clone(),
+                )
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
-                    if matches!(e, HttpClientError::Cancelled(_)) {
-                        let _ = std::fs::remove_file(&vtmp);
-                        task.status = DownloadStatus::Cancelled;
-                        task.error = Some("已停止（已删除已下载部分）".into());
-                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    if let HttpClientError::Cancelled(ref msg) = e {
+                        if msg.starts_with("pause:") {
+                            task.status = DownloadStatus::Paused;
+                            task.error = Some("已暂停（可续传）".into());
+                            return Ok(());
+                        } else {
+                            let _ = std::fs::remove_file(&vtmp);
+                            task.status = DownloadStatus::Cancelled;
+                            task.error = Some("已停止（已删除已下载部分）".into());
+                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        }
                     }
                     task.status = DownloadStatus::Failed;
                     task.error = Some(format!("视频下载失败: {}", e));
@@ -355,16 +396,22 @@ pub async fn run_task(
                 }
             }
             match client
-                .download_to_file(&audio, atmp.to_str().unwrap(), None, stop.clone())
+                .download_to_file(&audio, atmp.to_str().unwrap(), None, stop.clone(), pause.clone())
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
-                    if matches!(e, HttpClientError::Cancelled(_)) {
-                        let _ = std::fs::remove_file(&atmp);
-                        task.status = DownloadStatus::Cancelled;
-                        task.error = Some("已停止（已删除已下载部分）".into());
-                        return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                    if let HttpClientError::Cancelled(ref msg) = e {
+                        if msg.starts_with("pause:") {
+                            task.status = DownloadStatus::Paused;
+                            task.error = Some("已暂停（可续传）".into());
+                            return Ok(());
+                        } else {
+                            let _ = std::fs::remove_file(&atmp);
+                            task.status = DownloadStatus::Cancelled;
+                            task.error = Some("已停止（已删除已下载部分）".into());
+                            return Err(BiliApiError::Other(task.error.clone().unwrap()));
+                        }
                     }
                     task.status = DownloadStatus::Failed;
                     task.error = Some(format!("音频下载失败: {}", e));
@@ -415,6 +462,21 @@ pub async fn run_batch(
                 }
                 None => run_task(&client, &mut task, None, ctrl.as_ref()).await,
             };
+            // 任务收尾后再发一次进度事件，携带最终真实状态
+            // （Cancelled / Paused / Completed / Failed），供前端实时展示。
+            if let Some(ref arc_cb) = cb {
+                let final_progress = DlProgress {
+                    downloaded: 0,
+                    total: None,
+                    speed: 0,
+                    percent: if matches!(task.status, DownloadStatus::Completed) {
+                        100.0
+                    } else {
+                        0.0
+                    },
+                };
+                arc_cb(&task, final_progress);
+            }
             drop(permit);
             (idx, task, res)
         });
