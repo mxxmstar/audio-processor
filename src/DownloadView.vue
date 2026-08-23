@@ -61,6 +61,7 @@ const outputDir = ref("");
 const tasks = ref<Task[]>([]);
 const resolving = ref(false);
 const downloading = ref(false);
+const paused = ref(false);
 const message = ref("");
 
 const progressMap: Record<string, ProgressEvent> = reactive({});
@@ -192,7 +193,24 @@ async function doResolve() {
 async function doDownload() {
   if (tasks.value.length === 0) return;
   downloading.value = true;
+  paused.value = false;
   message.value = "开始下载…";
+  try {
+    await invoke<string[]>("bili_start_download", {
+      input: { outputDir: outputDir.value || null, concurrency: 3 },
+    });
+  } catch (e) {
+    message.value = String(e);
+    downloading.value = false;
+  }
+}
+
+// 继续下载：复用开始下载逻辑（基于已下载部分断点续传）
+async function doResume() {
+  if (tasks.value.length === 0) return;
+  paused.value = false;
+  downloading.value = true;
+  message.value = "继续下载…";
   try {
     await invoke<string[]>("bili_start_download", {
       input: { outputDir: outputDir.value || null, concurrency: 3 },
@@ -206,7 +224,8 @@ async function doDownload() {
 async function doPause() {
   try {
     await invoke("bili_pause_download");
-    message.value = "已发送暂停请求，当前任务下载完成后将暂停（可续传）";
+    paused.value = true;
+    message.value = "已暂停下载（可继续 / 断点续传）";
   } catch (e) {
     message.value = String(e);
   }
@@ -217,6 +236,7 @@ async function doStop() {
     await invoke("bili_stop_download");
     // 立即复位下载按钮（后台仍在收尾取消其余任务，但本轮交互已结束）
     downloading.value = false;
+    paused.value = false;
     message.value = "已停止下载，已删除已下载部分";
   } catch (e) {
     message.value = String(e);
@@ -242,11 +262,13 @@ onMounted(async () => {
     } else {
       // 下载阶段进度。后端此时会携带任务的真实枚举状态（如
       // "Downloading" / "Cancelled" / "Paused" / "Completed"），
-      // 据此实时更新对应任务的状态展示，并在终态时清除进度表项。
+      // 据此实时更新对应任务的状态展示。
       progressMap[p.task_id] = p;
       const t = tasks.value.find((x) => x.id === p.task_id);
       if (t) t.status = p.status as TaskStatus;
-      if (p.status !== "Downloading") {
+      // 仅「停止 / 失败」清除进度展示；「暂停 / 完成」保留
+      // （暂停需展示断点进度，完成由 download-finished 统一清理）。
+      if (p.status === "Cancelled" || p.status === "Failed") {
         delete progressMap[p.task_id];
       }
     }
@@ -255,6 +277,7 @@ onMounted(async () => {
     "download-finished",
     (e) => {
       downloading.value = false;
+      paused.value = false;
       message.value = e.payload.ok
         ? "全部下载完成"
         : `下载结束，${e.payload.failed} 个失败`;
@@ -339,27 +362,49 @@ onUnmounted(() => {
             <template #icon><SearchOutlined /></template>
             {{ resolving ? "解析中…" : "解析" }}
           </a-button>
+          <!-- 未开始：开始下载 -->
           <a-button
+            v-if="!downloading"
             type="primary"
-            :loading="downloading"
             :disabled="tasks.length === 0"
             @click="doDownload"
           >
             <template #icon><DownloadOutlined /></template>
-            {{ downloading ? "下载中…" : "开始下载" }}
+            开始下载
+          </a-button>
+          <!-- 下载中：显示进行中 + 暂停 / 停止 -->
+          <a-button
+            v-else-if="downloading && !paused"
+            type="primary"
+            :loading="true"
+            disabled
+          >
+            <template #icon><DownloadOutlined /></template>
+            下载中…
+          </a-button>
+          <!-- 已暂停：显示继续下载 -->
+          <a-button
+            v-else
+            type="primary"
+            @click="doResume"
+          >
+            <template #icon><DownloadOutlined /></template>
+            继续下载
           </a-button>
           <a-button
+            v-if="downloading && !paused"
+            :disabled="!downloading"
+            @click="doPause"
+          >
+            暂停下载
+          </a-button>
+          <a-button
+            v-if="downloading"
             danger
             :disabled="!downloading"
             @click="doStop"
           >
             停止下载
-          </a-button>
-          <a-button
-            :disabled="!downloading"
-            @click="doPause"
-          >
-            暂停下载
           </a-button>
         </a-space>
       </a-form>
@@ -421,12 +466,15 @@ onUnmounted(() => {
                   <div class="t-meta">
                     <a-tag :color="statusColor(item.status)">{{ statusText(item.status) }}</a-tag>
                     <a-tag>{{ item.mode }}</a-tag>
-                    <a-tag v-if="progressMap[item.id]" color="blue">下载中</a-tag>
-                    <template v-if="progressMap[item.id]">
+                    <a-tag v-if="item.status === 'Downloading' && progressMap[item.id]" color="blue">下载中</a-tag>
+                    <a-tag v-else-if="item.status === 'Paused' && progressMap[item.id]" color="gold">已暂停</a-tag>
+                    <template v-if="progressMap[item.id] && (item.status === 'Downloading' || item.status === 'Paused')">
                       {{ fmtBytes(progressMap[item.id].downloaded)
                       }}<template v-if="progressMap[item.id].total">
                         / {{ fmtBytes(progressMap[item.id].total) }}</template>
-                      · {{ fmtBytes(progressMap[item.id].speed) }}/s
+                      <template v-if="item.status === 'Downloading'">
+                        · {{ fmtBytes(progressMap[item.id].speed) }}/s</template>
+                      <template v-else> · 已暂停</template>
                     </template>
                     <span v-if="item.error" class="err"> · {{ item.error }}</span>
                   </div>
