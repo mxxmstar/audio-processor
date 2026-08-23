@@ -144,6 +144,20 @@ pub struct VideoInfo {
     pub duration: i64,
     #[serde(default)]
     pub stat: Stat,
+    /// 视频所属合集（UGC season）；存在且 id>0 时表示当前视频属于某个合集
+    #[serde(default)]
+    pub ugc_season: UgcSeason,
+}
+
+/// 视频所属合集信息（view 接口 ugc_season 字段）
+#[derive(Debug, Deserialize, Default)]
+pub struct UgcSeason {
+    /// 合集 id（= seasons_archives_list 接口所需的 season_id）
+    #[serde(default)]
+    pub id: i64,
+    /// 合集标题
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

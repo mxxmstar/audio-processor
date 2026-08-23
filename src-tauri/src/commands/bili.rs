@@ -132,17 +132,47 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
     // 识别目标类型并分发解析
     let target = identify(&input.input);
     let results = match target {
-        Target::Bv(bvid) => vec![video::resolve_video(&client, &bvid, prefer)
-            .await
-            .map_err(|e| e.to_string())?],
+        Target::Bv(bvid) => {
+            // 先取视频详情，判断是否属于合集（ugc_season）
+            let info = video::get_video_info(&client, &bvid)
+                .await
+                .map_err(|e| e.to_string())?;
+            if info.ugc_season.id > 0 {
+                video::resolve_collection(
+                    &client,
+                    &info.owner.mid.to_string(),
+                    &info.ugc_season.id.to_string(),
+                    prefer,
+                    None,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+            } else {
+                vec![video::resolve_video(&client, &bvid, prefer)
+                    .await
+                    .map_err(|e| e.to_string())?]
+            }
+        }
         Target::Av(aid) => {
-            // AV 号需先转 BV 号；复用 view 接口拿 bvid
+            // AV 号需先转 BV 号；复用 view 接口拿 bvid 与合集信息
             let info = video::get_video_info(&client, &bv_from_aid(aid))
                 .await
                 .map_err(|e| e.to_string())?;
-            vec![video::resolve_video(&client, &info.bvid, prefer)
+            if info.ugc_season.id > 0 {
+                video::resolve_collection(
+                    &client,
+                    &info.owner.mid.to_string(),
+                    &info.ugc_season.id.to_string(),
+                    prefer,
+                    None,
+                )
                 .await
-                .map_err(|e| e.to_string())?]
+                .map_err(|e| e.to_string())?
+            } else {
+                vec![video::resolve_video(&client, &info.bvid, prefer)
+                    .await
+                    .map_err(|e| e.to_string())?]
+            }
         }
         Target::Collection(mid, sid) => video::resolve_collection(&client, &mid, &sid, prefer, None)
             .await
@@ -197,7 +227,7 @@ pub async fn bili_resolve_async(
     let app_for_cb = app.clone();
     tauri::async_runtime::spawn(async move {
         // 预取条目总数，便于展示「解析 X/Y」
-        let total = match &target {
+        let mut total = match &target {
             Target::Bv(_) | Target::Av(_) => 1usize,
             Target::Collection(mid, sid) => {
                 match video::get_collection_bvids(&client, mid, sid).await {
@@ -226,16 +256,57 @@ pub async fn bili_resolve_async(
 
         let result = match &target {
             Target::Bv(bvid) => {
-                let r = video::resolve_video(&client, bvid, prefer).await;
-                cb.as_ref().map(|f| f(1, 1, bvid));
-                r.map(|r| vec![r])
+                // 先取视频详情，判断是否属于合集（ugc_season）
+                match video::get_video_info(&client, bvid).await {
+                    Ok(info) => {
+                        if info.ugc_season.id > 0 {
+                            // 属于合集：改用合集解析，并更新总数展示
+                            if let Ok(bvids) =
+                                video::get_collection_bvids(&client, &info.owner.mid.to_string(), &info.ugc_season.id.to_string()).await
+                            {
+                                total = bvids.len();
+                                emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
+                            }
+                            video::resolve_collection(
+                                &client,
+                                &info.owner.mid.to_string(),
+                                &info.ugc_season.id.to_string(),
+                                prefer,
+                                cb,
+                            )
+                            .await
+                        } else {
+                            let r = video::resolve_video(&client, bvid, prefer).await;
+                            cb.as_ref().map(|f| f(1, 1, bvid));
+                            r.map(|r| vec![r])
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Target::Av(aid) => {
                 match video::get_video_info(&client, &bv_from_aid(*aid)).await {
                     Ok(info) => {
-                        let r = video::resolve_video(&client, &info.bvid, prefer).await;
-                        cb.as_ref().map(|f| f(1, 1, &info.bvid));
-                        r.map(|r| vec![r])
+                        if info.ugc_season.id > 0 {
+                            if let Ok(bvids) =
+                                video::get_collection_bvids(&client, &info.owner.mid.to_string(), &info.ugc_season.id.to_string()).await
+                            {
+                                total = bvids.len();
+                                emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
+                            }
+                            video::resolve_collection(
+                                &client,
+                                &info.owner.mid.to_string(),
+                                &info.ugc_season.id.to_string(),
+                                prefer,
+                                cb,
+                            )
+                            .await
+                        } else {
+                            let r = video::resolve_video(&client, &info.bvid, prefer).await;
+                            cb.as_ref().map(|f| f(1, 1, &info.bvid));
+                            r.map(|r| vec![r])
+                        }
                     }
                     Err(e) => Err(e),
                 }
