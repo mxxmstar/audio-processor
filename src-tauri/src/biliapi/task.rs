@@ -72,21 +72,32 @@ pub struct DownloadTask {
 
 impl DownloadTask {
     /// 从解析结果的一个分 P 构造任务
+    /// `multi_page` 为 true 时该视频含多个分 P，标题需用 `part` 区分；
+    /// 单 P 视频优先用视频真实标题 `res.title`（`part` 常为占位名如 "v3"）。
     pub fn from_page(
         res: &ResolveResult,
         page: &PageStream,
         mode: DownloadMode,
         output_dir: &str,
         group: Option<TaskGroup>,
+        multi_page: bool,
     ) -> Self {
         let id = format!("{}#{}", res.bvid, page.page);
-        DownloadTask {
-            id,
-            title: if page.part.is_empty() {
+        let title = if multi_page {
+            // 多 P：用分 P 名区分，part 为空时回退「标题 Pn」
+            if page.part.is_empty() {
                 format!("{} P{}", res.title, page.page)
             } else {
-                format!("{}", page.part)
-            },
+                page.part.clone()
+            }
+        } else {
+            // 单 P：直接用视频真实标题。分 P 名（part）常为占位名
+            // （如 "v3"）或默认等于标题，不应覆盖真实标题。
+            res.title.clone()
+        };
+        DownloadTask {
+            id,
+            title,
             video_url: page.video_url.clone(),
             audio_url: page.audio_url.clone(),
             mode,
@@ -107,8 +118,16 @@ impl DownloadTask {
     ) -> Vec<Self> {
         let mut tasks = Vec::new();
         for res in results {
+            let multi = res.pages.len() > 1;
             for page in &res.pages {
-                tasks.push(Self::from_page(res, page, mode, output_dir, group.clone()));
+                tasks.push(Self::from_page(
+                    res,
+                    page,
+                    mode,
+                    output_dir,
+                    group.clone(),
+                    multi,
+                ));
             }
         }
         tasks
@@ -294,9 +313,13 @@ mod tests {
     use super::*;
 
     fn page_stream(video: Option<&str>, audio: Option<&str>) -> PageStream {
+        page_stream_with_part(video, audio, "P1")
+    }
+
+    fn page_stream_with_part(video: Option<&str>, audio: Option<&str>, part: &str) -> PageStream {
         PageStream {
             page: 1,
-            part: "P1".into(),
+            part: part.into(),
             video_url: video.map(|s| s.to_string()),
             audio_url: audio.map(|s| s.to_string()),
             actual_format: 80,
@@ -314,7 +337,7 @@ mod tests {
     #[test]
     fn test_from_page_mode_and_title() {
         let res = resolve_result(vec![page_stream(Some("v"), Some("a"))]);
-        let task = DownloadTask::from_page(&res, &res.pages[0], DownloadMode::Merge, "/tmp", None);
+        let task = DownloadTask::from_page(&res, &res.pages[0], DownloadMode::Merge, "/tmp", None, false);
         assert_eq!(task.id, "BV1xx#1");
         assert_eq!(task.mode, DownloadMode::Merge);
         assert_eq!(task.video_url.as_deref(), Some("v"));
@@ -323,15 +346,45 @@ mod tests {
     }
 
     #[test]
-    fn test_from_resolves_expands_per_page() {
+    fn test_from_resolves_multi_page_uses_part() {
+        // 多 P：标题用分 P 名（part）区分
         let res = resolve_result(vec![
-            page_stream(Some("v1"), Some("a1")),
-            page_stream(Some("v2"), Some("a2")),
+            page_stream_with_part(Some("v1"), Some("a1"), "P1"),
+            page_stream_with_part(Some("v2"), Some("a2"), "P2"),
         ]);
         let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp", None);
         assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].title, "P1");
+        assert_eq!(tasks[1].title, "P2");
         assert_eq!(tasks[0].audio_url.as_deref(), Some("a1"));
         assert_eq!(tasks[1].video_url.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn test_from_resolves_single_page_uses_real_title() {
+        // 单 P：标题应取视频真实标题，而非 part 占位名（如 "v3"）
+        let res = resolve_result(vec![page_stream_with_part(Some("v"), Some("a"), "")]);
+        let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp", None);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "测试视频");
+    }
+
+    #[test]
+    fn test_single_page_placeholder_part_not_used() {
+        // 复现真实 bug：单 P 视频 part="v3" 这种占位名不应成为标题
+        let res = ResolveResult {
+            bvid: "BV1xx".into(),
+            title: "伊利亚的赌注：马斯克曾嘲讽的GPT路线【硅基诗篇5】".into(),
+            pages: vec![PageStream {
+                page: 1,
+                part: "v3".into(),
+                video_url: Some("v".into()),
+                audio_url: Some("a".into()),
+                actual_format: 80,
+            }],
+        };
+        let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp", None);
+        assert_eq!(tasks[0].title, "伊利亚的赌注：马斯克曾嘲讽的GPT路线【硅基诗篇5】");
     }
 
     #[test]
