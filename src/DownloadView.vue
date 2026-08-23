@@ -238,8 +238,13 @@ onMounted(async () => {
       resolveCurrent.value = p.title;
       message.value = `解析中 ${resolveDone.value}/${resolveTotal.value} · ${p.title}`;
     } else {
-      // 下载阶段进度
-      progressMap[p.task_id] = p;
+      // 下载阶段进度。若任务已处于终态（暂停/停止/完成/失败），
+      // 不再保留其进度展示，立即从进度表移除，避免停止后进度残留。
+      if (p.status === "Downloading") {
+        progressMap[p.task_id] = p;
+      } else {
+        delete progressMap[p.task_id];
+      }
     }
   });
   off2 = await listen<{ ok: boolean; failed: number }>(
@@ -252,6 +257,10 @@ onMounted(async () => {
       invoke<Task[]>("bili_list_tasks")
         .then((t) => (tasks.value = t))
         .catch(() => {});
+      // 清理进度表：整轮下载已结束，移除所有残留进度展示
+      for (const k of Object.keys(progressMap)) {
+        delete progressMap[k];
+      }
     }
   );
   off3 = await listen<ResolveFinished>("resolve-finished", (e) => {
