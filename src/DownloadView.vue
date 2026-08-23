@@ -215,7 +215,7 @@ onUnmounted(() => {
         <a-form-item label="视频地址">
           <a-input
             v-model:value="inputUrl"
-            placeholder="BV 号 / 链接 / av 号 / 合集(ss) / 番剧"
+            placeholder="BV 号 / 链接 / av 号 / 合集(含合集页URL) / 番剧"
             allow-clear
           />
         </a-form-item>

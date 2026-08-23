@@ -388,6 +388,7 @@ fn emit_resolve_progress(app: &AppHandle, done: usize, total: usize, title: &str
 }
 
 /// 输入目标类型
+#[derive(Debug)]
 enum Target {
     Bv(String),
     Av(i64),
@@ -412,12 +413,28 @@ fn identify(input: &str) -> Target {
     }
     // 链接：提取 query 参数
     if s.contains("bilibili.com") {
+        // —— 合集 / 系列页（space.bilibili.com）优先识别 ——
+        // 支持 query 形式（?sid=..&mid=..）与路径形式
+        // （/channel/collection/detail/{sid} 或 /channel/series/detail/{sid}）
+        if let Some(sid) = extract_query(s, "sid")
+            .or_else(|| extract_path_token(s, "detail"))
+        {
+            let mid = extract_query(s, "mid")
+                .or_else(|| extract_mid_from_space(s))
+                .unwrap_or_default();
+            if !mid.is_empty() {
+                return Target::Collection(mid, sid);
+            }
+        }
+
         if let Some(ssid) = extract_query(s, "ssid").or_else(|| {
-            extract_path_token(s, "ss")
+            extract_path_token(s, "ss").or_else(|| extract_prefixed_token(s, "ss"))
         }) {
             return Target::Season(ssid);
         }
-        if let Some(ep) = extract_query(s, "ep_id").or_else(|| extract_path_token(s, "ep")) {
+        if let Some(ep) = extract_query(s, "ep_id").or_else(|| {
+            extract_path_token(s, "ep").or_else(|| extract_prefixed_token(s, "ep"))
+        }) {
             // ep 也需要 season 信息，但 resolve_season 仅接受 ssid；
             // 简化：ep 直接当作 ss 不可用，这里回退用 bvid 解析
             if let Some(bvid) = extract_query(s, "bvid") {
@@ -443,6 +460,21 @@ fn identify(input: &str) -> Target {
     Target::Bv(s.to_string())
 }
 
+/// 从 space.bilibili.com 路径提取 UP 主 mid：
+/// 形如 `space.bilibili.com/123456/...` 中的第一段数字
+fn extract_mid_from_space(url: &str) -> Option<String> {
+    let idx = url.find("space.bilibili.com")?;
+    let after = &url[idx + "space.bilibili.com".len()..];
+    let rest = after.trim_start_matches('/');
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let tok = &rest[..end];
+    if !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit()) {
+        Some(tok.to_string())
+    } else {
+        None
+    }
+}
+
 /// 从 URL 路径提取形如 /ss123/ 或 /ep123/ 的 token
 fn extract_path_token(url: &str, prefix: &str) -> Option<String> {
     let pat = format!("/{}/", prefix);
@@ -455,6 +487,23 @@ fn extract_path_token(url: &str, prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 从 URL 路径提取前缀连写 token，如 `/ss12345`、`/ep678` 或 `/ss12345/`
+/// （前缀后紧跟数字，直到下一个分隔符）
+fn extract_prefixed_token(url: &str, prefix: &str) -> Option<String> {
+    let pat = format!("/{}", prefix);
+    let pos = url.find(&pat)?;
+    let after = &url[pos + pat.len()..];
+    let end = after
+        .find(['/', '?', '#', '&'])
+        .unwrap_or(after.len());
+    let tok = &after[..end];
+    if !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit()) {
+        Some(tok.to_string())
+    } else {
+        None
+    }
 }
 
 /// 从 query 提取参数值
@@ -712,4 +761,84 @@ fn mode_label(m: crate::biliapi::task::DownloadMode) -> String {
         DownloadMode::Merge => "音视频合并",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identify_collection_query() {
+        let t = identify("https://space.bilibili.com/123456/channel/collection/detail?sid=789&mid=123456");
+        match t {
+            Target::Collection(mid, sid) => {
+                assert_eq!(mid, "123456");
+                assert_eq!(sid, "789");
+            }
+            _ => panic!("期望 Collection，实际 {:?}", t),
+        }
+    }
+
+    #[test]
+    fn test_identify_collection_path() {
+        let t = identify("https://space.bilibili.com/123456/channel/series/detail/789");
+        match t {
+            Target::Collection(mid, sid) => {
+                assert_eq!(mid, "123456");
+                assert_eq!(sid, "789");
+            }
+            _ => panic!("期望 Collection，实际 {:?}", t),
+        }
+    }
+
+    #[test]
+    fn test_identify_collection_mid_query_only() {
+        // mid 来自 query，sid 来自 query
+        let t = identify("https://space.bilibili.com/channel/collection/detail?sid=789&mid=555");
+        match t {
+            Target::Collection(mid, sid) => {
+                assert_eq!(mid, "555");
+                assert_eq!(sid, "789");
+            }
+            _ => panic!("期望 Collection，实际 {:?}", t),
+        }
+    }
+
+    #[test]
+    fn test_identify_bv_still_works() {
+        let t = identify("BV16w4m1277k");
+        match t {
+            Target::Bv(b) => assert_eq!(b, "BV16w4m1277k"),
+            _ => panic!("期望 Bv，实际 {:?}", t),
+        }
+    }
+
+    #[test]
+    fn test_identify_video_page_not_collection() {
+        // 普通视频页（无 sid/mid）不误判为合集
+        let t = identify("https://www.bilibili.com/video/BV16w4m1277k?vd_source=abc");
+        match t {
+            Target::Bv(b) => assert_eq!(b, "BV16w4m1277k"),
+            _ => panic!("期望 Bv，实际 {:?}", t),
+        }
+    }
+
+    #[test]
+    fn test_identify_season_ssid() {
+        let t = identify("https://www.bilibili.com/bangumi/play/?ssid=12345");
+        match t {
+            Target::Season(ss) => assert_eq!(ss, "12345"),
+            _ => panic!("期望 Season，实际 {:?}", t),
+        }
+    }
+
+    #[test]
+    fn test_identify_season_ss_prefixed_path() {
+        // 番剧路径连写形式 /bangumi/play/ss12345
+        let t = identify("https://www.bilibili.com/bangumi/play/ss12345");
+        match t {
+            Target::Season(ss) => assert_eq!(ss, "12345"),
+            _ => panic!("期望 Season，实际 {:?}", t),
+        }
+    }
 }
