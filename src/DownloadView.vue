@@ -238,9 +238,10 @@ onMounted(async () => {
       resolveCurrent.value = p.title;
       message.value = `解析中 ${resolveDone.value}/${resolveTotal.value} · ${p.title}`;
     } else {
-      // 下载阶段进度。若任务已处于终态（暂停/停止/完成/失败），
-      // 不再保留其进度展示，立即从进度表移除，避免停止后进度残留。
-      if (p.status === "Downloading") {
+      // 下载阶段进度。后端 status 字段为中文标签（如「下载中」）。
+      // 仅当处于下载中时保留进度；若已为终态（已暂停/已停止/已完成/失败），
+      // 立即从进度表移除，避免停止后进度残留。
+      if (p.status === "下载中") {
         progressMap[p.task_id] = p;
       } else {
         delete progressMap[p.task_id];
