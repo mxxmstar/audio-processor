@@ -238,14 +238,9 @@ onMounted(async () => {
       resolveCurrent.value = p.title;
       message.value = `解析中 ${resolveDone.value}/${resolveTotal.value} · ${p.title}`;
     } else {
-      // 下载阶段进度。后端 status 字段为中文标签（如「下载中」）。
-      // 仅当处于下载中时保留进度；若已为终态（已暂停/已停止/已完成/失败），
-      // 立即从进度表移除，避免停止后进度残留。
-      if (p.status === "下载中") {
-        progressMap[p.task_id] = p;
-      } else {
-        delete progressMap[p.task_id];
-      }
+      // 下载阶段进度：无条件写入进度表。
+      // 停止/暂停后的残留由 download-finished 事件统一清空（已取消任务仍会触发该事件）。
+      progressMap[p.task_id] = p;
     }
   });
   off2 = await listen<{ ok: boolean; failed: number }>(
@@ -418,8 +413,8 @@ onUnmounted(() => {
                   <div class="t-meta">
                     <a-tag :color="statusColor(item.status)">{{ statusText(item.status) }}</a-tag>
                     <a-tag>{{ item.mode }}</a-tag>
-                    <a-tag v-if="progressMap[item.id] && item.status === 'Downloading'" color="blue">下载中</a-tag>
-                    <template v-if="progressMap[item.id] && item.status === 'Downloading'">
+                    <a-tag v-if="progressMap[item.id]" color="blue">下载中</a-tag>
+                    <template v-if="progressMap[item.id]">
                       {{ fmtBytes(progressMap[item.id].downloaded)
                       }}<template v-if="progressMap[item.id].total">
                         / {{ fmtBytes(progressMap[item.id].total) }}</template>
