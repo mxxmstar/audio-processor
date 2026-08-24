@@ -65,6 +65,9 @@ const downloading = ref(false);
 const paused = ref(false);
 const message = ref("");
 
+// 勾选状态：以任务 id 为键的集合，仅勾选的任务会被下载
+const selectedIds = ref<Set<string>>(new Set());
+
 const progressMap: Record<string, ProgressEvent> = reactive({});
 
 // 解析阶段进度展示（区分「解析中 / 下载中」）
@@ -198,7 +201,11 @@ async function doDownload() {
   message.value = "开始下载…";
   try {
     await invoke<string[]>("bili_start_download", {
-      input: { outputDir: outputDir.value || null, concurrency: 3 },
+      input: {
+        outputDir: outputDir.value || null,
+        concurrency: 3,
+        taskIds: Array.from(selectedIds.value),
+      },
     });
   } catch (e) {
     message.value = String(e);
@@ -214,7 +221,11 @@ async function doResume() {
   message.value = "继续下载…";
   try {
     await invoke<string[]>("bili_start_download", {
-      input: { outputDir: outputDir.value || null, concurrency: 3 },
+      input: {
+        outputDir: outputDir.value || null,
+        concurrency: 3,
+        taskIds: Array.from(selectedIds.value),
+      },
     });
   } catch (e) {
     message.value = String(e);
@@ -242,6 +253,37 @@ async function doStop() {
   } catch (e) {
     message.value = String(e);
   }
+}
+
+// 已勾选数量
+const selectedCount = computed(() => selectedIds.value.size);
+
+function isSelected(id: string): boolean {
+  return selectedIds.value.has(id);
+}
+
+function toggleSelect(id: string) {
+  const s = new Set(selectedIds.value);
+  if (s.has(id)) s.delete(id);
+  else s.add(id);
+  selectedIds.value = s;
+}
+
+// 全部选择：勾选当前所有任务
+function selectAll() {
+  selectedIds.value = new Set(tasks.value.map((t) => t.id));
+}
+
+// 全部取消：清空勾选
+function clearSelection() {
+  selectedIds.value = new Set();
+}
+
+// 解析结果写入时，默认全选（保留已有勾选状态，新增任务默认选中）
+function syncSelectionOnTasks() {
+  const s = new Set(selectedIds.value);
+  for (const t of tasks.value) s.add(t.id);
+  selectedIds.value = s;
 }
 
 let off1: UnlistenFn | null = null;
@@ -292,10 +334,11 @@ onMounted(async () => {
     }
   );
   off3 = await listen<ResolveFinished>("resolve-finished", (e) => {
-    resolving.value = false;
-    if (e.payload.ok) {
-      tasks.value = e.payload.tasks;
-      message.value =
+  resolving.value = false;
+  if (e.payload.ok) {
+    tasks.value = e.payload.tasks;
+    syncSelectionOnTasks();
+    message.value =
         e.payload.resolved > 0
           ? `解析完成，共 ${e.payload.resolved} 个可下载项`
           : "解析完成";
@@ -418,6 +461,23 @@ onUnmounted(() => {
         :message="message"
       />
 
+      <a-space
+        v-if="tasks.length"
+        class="select-bar"
+        wrap
+      >
+        <a-checkbox
+          :checked="selectedCount === tasks.length && tasks.length > 0"
+          :indeterminate="selectedCount > 0 && selectedCount < tasks.length"
+          @change="(e: any) => (e.target.checked ? selectAll() : clearSelection())"
+        >
+          全选
+        </a-checkbox>
+        <a-button size="small" @click="selectAll">全部选择</a-button>
+        <a-button size="small" @click="clearSelection">全部取消</a-button>
+        <span class="sel-count">已选 {{ selectedCount }} / {{ tasks.length }}</span>
+      </a-space>
+
       <a-card
         v-if="resolving && resolveTotal > 0"
         size="small"
@@ -460,6 +520,11 @@ onUnmounted(() => {
             <template #renderItem="{ item }">
               <a-list-item>
                 <div class="task-row">
+                  <a-checkbox
+                    class="task-check"
+                    :checked="isSelected(item.id)"
+                    @change="() => toggleSelect(item.id)"
+                  />
                   <img
                     v-if="item.cover"
                     :src="item.cover"
@@ -544,11 +609,23 @@ onUnmounted(() => {
 .task-list {
   margin-top: 1rem;
 }
+.select-bar {
+  margin: 1rem 0 0.5rem;
+}
+.sel-count {
+  font-size: 0.85rem;
+  color: #8a94a6;
+}
 .task-row {
   display: flex;
   align-items: stretch;
   gap: 0.8rem;
   width: 100%;
+}
+.task-check {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
 }
 .task-cover {
   width: 96px;

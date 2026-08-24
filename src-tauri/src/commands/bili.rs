@@ -40,6 +40,10 @@ pub struct StartDownloadInput {
     pub output_dir: Option<String>,
     #[serde(default)]
     pub concurrency: Option<usize>,
+    /// 仅下载指定 ID 的任务（用于前端手动勾选）。
+    /// 为 None 时下载全部已解析任务。
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
 }
 
 /// 生成的登录二维码
@@ -604,9 +608,20 @@ pub async fn bili_start_download(
     app: AppHandle,
     state: State<'_, BiliState>,
 ) -> Result<Vec<String>, String> {
-    let tasks = state.snapshot_tasks();
+    let mut tasks = state.snapshot_tasks();
     if tasks.is_empty() {
         return Err("没有可下载的任务，请先调用 bili_resolve".to_string());
+    }
+    // 仅下载前端勾选的任务（task_ids 指定）；为 None 时下载全部
+    if let Some(ids) = &input.task_ids {
+        if ids.is_empty() {
+            return Err("未勾选任何任务".to_string());
+        }
+        let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+        tasks.retain(|t| id_set.contains(&t.id));
+        if tasks.is_empty() {
+            return Err("未勾选任何任务".to_string());
+        }
     }
     // 下载并发度：用户显式指定优先；否则走统一入口（默认 3，受 BILI_CONCURRENCY 覆盖）
     let concurrency = input
