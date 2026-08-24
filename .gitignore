@@ -35,6 +35,7 @@ src-tauri/icon-src.png
 !bin/
 bin/fpcalc.exe
 bin/ffmpeg.exe
+bin/ffprobe.exe
 bin/ffmpeg
 bin/ffmpeg-*
 bilidown/
