@@ -11,6 +11,15 @@ import {
 import type { MenuProps } from "ant-design-vue";
 
 type TaskStatus = "Pending" | "Downloading" | "Completed" | "Failed" | "Paused" | "Cancelled";
+type RecognitionStatus =
+  | "Disabled"
+  | "Pending"
+  | "Recognizing"
+  | "Renamed"
+  | "NoMatch"
+  | "BelowThreshold"
+  | "Failed"
+  | "RenameFailed";
 
 interface TaskGroup {
   id: string;
@@ -27,12 +36,23 @@ interface Task {
   out_path: string;
   status: TaskStatus;
   error: string | null;
+  source_title?: string;
+  recognition_status?: RecognitionStatus;
+  recognition_result?: {
+    title: string;
+    artist: string;
+    album: string | null;
+    album_date: string | null;
+    confidence: number;
+  } | null;
+  recognition_error?: string | null;
+  output_path?: string | null;
   group: TaskGroup | null;
   cover: string | null;
 }
 
 interface ProgressEvent {
-  phase: string; // "resolve" | "download"
+  phase: string; // "resolve" | "download" | "recognize" | "rename"
   task_id: string;
   title: string;
   status: string;
@@ -41,6 +61,9 @@ interface ProgressEvent {
   total: number;
   speed: number;
   error: string | null;
+  source_title: string;
+  output_path: string | null;
+  confidence: number | null;
 }
 
 interface ResolveFinished {
@@ -58,6 +81,8 @@ const inputUrl = ref("");
 const preferFormat = ref("1080P");
 const mode = ref<"audio" | "video" | "merge">("audio");
 const outputDir = ref("");
+const autoRename = ref(true);
+const confidenceThreshold = ref(70);
 
 const tasks = ref<Task[]>([]);
 const resolving = ref(false);
@@ -151,6 +176,31 @@ function statusText(s: TaskStatus): string {
   }
 }
 
+function recognitionText(s?: RecognitionStatus): string {
+  switch (s) {
+    case "Recognizing": return "识别中";
+    case "Renamed": return "已重命名";
+    case "NoMatch": return "未匹配";
+    case "BelowThreshold": return "置信度不足";
+    case "Failed": return "识别失败";
+    case "RenameFailed": return "重命名失败";
+    case "Disabled": return "未启用识别";
+    default: return "等待识别";
+  }
+}
+
+function recognitionColor(s?: RecognitionStatus): string {
+  switch (s) {
+    case "Renamed": return "success";
+    case "Recognizing": return "processing";
+    case "NoMatch":
+    case "BelowThreshold": return "warning";
+    case "Failed":
+    case "RenameFailed": return "error";
+    default: return "default";
+  }
+}
+
 async function pickDir() {
   try {
     const sel = await open({
@@ -205,6 +255,8 @@ async function doDownload() {
         outputDir: outputDir.value || null,
         concurrency: 3,
         taskIds: Array.from(selectedIds.value),
+        autoRename: mode.value === "audio" ? autoRename.value : false,
+        confidenceThreshold: confidenceThreshold.value,
       },
     });
   } catch (e) {
@@ -225,6 +277,8 @@ async function doResume() {
         outputDir: outputDir.value || null,
         concurrency: 3,
         taskIds: Array.from(selectedIds.value),
+        autoRename: mode.value === "audio" ? autoRename.value : false,
+        confidenceThreshold: confidenceThreshold.value,
       },
     });
   } catch (e) {
@@ -354,22 +408,31 @@ onMounted(async () => {
       // 据此实时更新对应任务的状态展示。
       progressMap[p.task_id] = p;
       const t = tasks.value.find((x) => x.id === p.task_id);
-      if (t) t.status = p.status as TaskStatus;
+      if (t) {
+        if (p.phase === "download") t.status = p.status as TaskStatus;
+        if (p.phase === "recognize" || p.phase === "rename") {
+          t.recognition_status = p.status as RecognitionStatus;
+          t.recognition_error = p.error;
+          t.output_path = p.output_path;
+        }
+      }
+      if (p.phase === "recognize") message.value = `识别中 · ${p.title}`;
+      if (p.phase === "rename") message.value = `正在生成 MP3 · ${p.title}`;
       // 仅「停止 / 失败」清除进度展示；「暂停 / 完成」保留
       // （暂停需展示断点进度，完成由 download-finished 统一清理）。
-      if (p.status === "Cancelled" || p.status === "Failed") {
+      if (p.status === "Cancelled" || (p.phase === "download" && p.status === "Failed")) {
         delete progressMap[p.task_id];
       }
     }
   });
-  off2 = await listen<{ ok: boolean; failed: number }>(
+  off2 = await listen<{ ok: boolean; failed: number; renamed: number; recognize_failed: number; fallback: number }>(
     "download-finished",
     (e) => {
       downloading.value = false;
       paused.value = false;
       message.value = e.payload.ok
-        ? "全部下载完成"
-        : `下载结束，${e.payload.failed} 个失败`;
+        ? `下载完成，${e.payload.renamed} 个已重命名${e.payload.fallback ? `，${e.payload.fallback} 个使用原始标题` : ""}`
+        : `下载结束，${e.payload.failed} 个下载失败`;
       invoke<Task[]>("bili_list_tasks")
         .then((t) => (tasks.value = t))
         .catch(() => {});
@@ -444,6 +507,18 @@ onUnmounted(() => {
                   {{ outputDir || "默认：应用配置目录" }}
                 </a-typography-text>
               </a-space>
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <a-row v-if="mode === 'audio'" :gutter="12">
+          <a-col :span="8">
+            <a-form-item label="自动识别并重命名">
+              <a-switch v-model:checked="autoRename" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="8" v-if="autoRename">
+            <a-form-item label="最低识别置信度">
+              <a-input-number v-model:value="confidenceThreshold" :min="0" :max="100" :precision="1" addon-after="%" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -591,6 +666,13 @@ onUnmounted(() => {
                   <div class="t-meta">
                     <a-tag :color="statusColor(item.status)">{{ statusText(item.status) }}</a-tag>
                     <a-tag>{{ item.mode }}</a-tag>
+                    <a-tag v-if="item.mode === 'AudioOnly' || item.mode === 'audio'" :color="recognitionColor(item.recognition_status)">
+                      {{ recognitionText(item.recognition_status) }}
+                    </a-tag>
+                    <span v-if="item.recognition_result" class="recognition-meta">
+                      {{ item.recognition_result.title }} · {{ item.recognition_result.artist }}
+                      · {{ item.recognition_result.confidence.toFixed(1) }}%
+                    </span>
                     <a-tag v-if="item.status === 'Downloading' && progressMap[item.id]" color="blue">下载中</a-tag>
                     <a-tag v-else-if="item.status === 'Paused' && progressMap[item.id]" color="gold">已暂停</a-tag>
                     <template v-if="progressMap[item.id] && (item.status === 'Downloading' || item.status === 'Paused')">
@@ -602,6 +684,7 @@ onUnmounted(() => {
                       <template v-else> · 已暂停</template>
                     </template>
                     <span v-if="item.error" class="err"> · {{ item.error }}</span>
+                    <span v-if="item.recognition_error" class="err"> · {{ item.recognition_error }}</span>
                   </div>
                   <a-progress
                     :percent="
@@ -728,6 +811,9 @@ onUnmounted(() => {
 }
 .err {
   color: #c00;
+}
+.recognition-meta {
+  color: #3d5a80;
 }
 .task-collapse {
   margin-top: 1rem;

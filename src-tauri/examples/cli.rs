@@ -1,7 +1,6 @@
 // 临时验证脚本：验证完整识别链路（fpcalc + AcoustID + MusicBrainz）。
 // 用法：cargo run --example cli -- "音频文件路径"
-use audio_processor_lib::commands;
-use audio_processor_lib::fingerprint;
+use audio_processor_lib::recognizer::{self, fingerprint};
 
 #[tokio::main]
 async fn main() {
@@ -19,7 +18,7 @@ async fn main() {
     println!("指纹前 100: {}", &fp.chars().take(100).collect::<String>());
 
     println!("正在识别…");
-    match commands::run_identify(&fpcalc, &path).await {
+    match recognizer::run_identify(&fpcalc, &path).await {
         Ok(info) => {
             println!("标题: {}", info.title);
             println!("艺术家: {}", info.artist);

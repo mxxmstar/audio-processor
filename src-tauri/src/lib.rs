@@ -1,10 +1,11 @@
 // 子模块声明
-pub mod commands;       // Tauri 命令（桥接层，仅负责前端调用与 fpcalc 资源路径解析）
-pub mod recognizer;     // 音频识别独立模块（指纹/查询/错误集中于此，与 Tauri 解耦）
-pub mod http_client;    // HTTP 客户端封装（用于向外部服务器如 B 站发送请求）
-pub mod biliapi;        // B 站 API 封装（基于 http_client，封装 bilidownload 中的 B 站调用）
-pub mod bili_state;     // 阶段 5：B 站功能共享状态（登录态目录 + 任务列表）
-pub mod history;        // 通用历史记录模块（音频识别 / B站下载共用）
+pub mod audio_rename; // 音频命名、冲突处理和本地文件移动
+pub mod commands; // Tauri 命令（桥接层，仅负责前端调用与 fpcalc 资源路径解析）
+pub mod recognizer; // 音频识别独立模块（指纹/查询/错误集中于此，与 Tauri 解耦）
+pub mod http_client; // HTTP 客户端封装（用于向外部服务器如 B 站发送请求）
+pub mod biliapi; // B 站 API 封装（基于 http_client，封装 bilidownload 中的 B 站调用）
+pub mod bili_state; // 阶段 5：B 站功能共享状态（登录态目录 + 任务列表）
+pub mod history; // 通用历史记录模块（音频识别 / B站下载共用）
 
 use bili_state::BiliState;
 use tauri::Manager;

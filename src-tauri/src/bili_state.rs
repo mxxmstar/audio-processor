@@ -57,8 +57,7 @@ impl BiliState {
         let mut guard = self.inner.tasks.lock().unwrap();
         for u in updated {
             if let Some(slot) = guard.iter_mut().find(|t| t.id == u.id) {
-                slot.status = u.status;
-                slot.error = u.error.clone();
+                *slot = u.clone();
             }
         }
     }

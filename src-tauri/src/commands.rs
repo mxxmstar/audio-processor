@@ -20,30 +20,37 @@ pub(crate) fn history_dir(app: &AppHandle) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Tauri 命令：供前端通过 `invoke('identify', { path })` 调用。
-/// 接收音频文件绝对路径，返回识别结果；成功后自动写入通用历史库。
-#[tauri::command]
-pub fn identify(app: AppHandle, path: String) -> Result<SongInfo, String> {
-    // 解析随附的 fpcalc 工具路径（开发期与打包后位置不同）
+/// 解析随附的 fpcalc 工具路径，统一覆盖打包环境和开发环境。
+pub(crate) fn fpcalc_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|e| format!("获取资源目录失败: {e}"))?;
-    let mut fpcalc_path = resource_dir.join("fpcalc.exe");
-    // 开发期（tauri dev）资源目录可能不含 fpcalc，回退到仓库 bin 目录
-    if !fpcalc_path.exists() {
-        fpcalc_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let mut path = resource_dir.join("fpcalc.exe");
+    if !path.exists() {
+        path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("bin")
             .join("fpcalc.exe");
     }
-    let fpcalc_path = fpcalc_path.to_string_lossy().to_string();
+    if !path.exists() {
+        return Err(format!("找不到 fpcalc.exe: {}", path.display()));
+    }
+    Ok(path)
+}
+
+/// Tauri 命令：供前端通过 `invoke('identify', { path })` 调用。
+/// 接收音频文件绝对路径，返回识别结果；成功后自动写入通用历史库。
+#[tauri::command]
+pub fn identify(app: AppHandle, path: String) -> Result<SongInfo, String> {
+    let fpcalc_path = fpcalc_path(&app)?.to_string_lossy().into_owned();
 
     let path_clone = path.clone();
-    let result = tauri::async_runtime::block_on(async move {
-        run_identify(&fpcalc_path, &path_clone).await
-    })
-    .map_err(|e| e.to_string())?;
+    let result =
+        tauri::async_runtime::block_on(
+            async move { run_identify(&fpcalc_path, &path_clone).await },
+        )
+        .map_err(|e| e.to_string())?;
 
     // 识别成功，写入通用历史库（失败不影响返回结果）
     if let Ok(conn) = history::open_db(&history_dir(&app)) {
@@ -99,7 +106,9 @@ pub fn open_path(path: String) -> Result<(), String> {
         (p.to_path_buf(), None)
     } else {
         (
-            p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| p.to_path_buf()),
+            p.parent()
+                .map(|x| x.to_path_buf())
+                .unwrap_or_else(|| p.to_path_buf()),
             Some(p),
         )
     };

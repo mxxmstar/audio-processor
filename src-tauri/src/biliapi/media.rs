@@ -157,8 +157,11 @@ pub fn merge_with_options(
     output: &str,
     options: &MergeOptions,
 ) -> Result<(), BiliApiError> {
-    let bin = find_ffmpeg()
-        .ok_or_else(|| BiliApiError::Other("未找到可用的 ffmpeg，无法合并音视频（请安装 ffmpeg 或放入 bin/ 目录）".into()))?;
+    let bin = find_ffmpeg().ok_or_else(|| {
+        BiliApiError::Other(
+            "未找到可用的 ffmpeg，无法合并音视频（请安装 ffmpeg 或放入 bin/ 目录）".into(),
+        )
+    })?;
     // 去掉 \\?\ 前缀，否则 ffmpeg 无法加载其依赖 DLL
     let bin = strip_verbatim(&bin);
 
@@ -200,6 +203,50 @@ pub fn merge_with_options(
         )));
     }
     println!("[media] ffmpeg 合并成功 -> {}", output);
+    Ok(())
+}
+
+/// 使用 ffmpeg 将下载得到的音频转码为 MP3。
+///
+/// 输出文件由调用方预先分配，使用 `-q:a 2` 生成较高质量的 VBR MP3，
+/// 不依赖输入文件的扩展名判断编码格式。
+pub fn transcode_audio(input: &str, output: &str) -> Result<(), BiliApiError> {
+    let bin = find_ffmpeg().ok_or_else(|| {
+        BiliApiError::Other(
+            "未找到可用的 ffmpeg，无法生成 MP3（请安装 ffmpeg 或放入 bin/ 目录）".into(),
+        )
+    })?;
+    let bin = strip_verbatim(&bin);
+    let status = std::process::Command::new(&bin)
+        .args([
+            "-y",
+            "-i",
+            input,
+            "-vn",
+            "-map_metadata",
+            "0",
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            "-f",
+            "mp3",
+            output,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| BiliApiError::Other(format!("调用 ffmpeg 转码失败: {e}")))?;
+
+    if !status.status.success() {
+        let _ = std::fs::remove_file(output);
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        return Err(BiliApiError::Other(format!(
+            "ffmpeg MP3 转码失败（退出码 {:?}）：{}",
+            status.status.code(),
+            stderr.lines().last().unwrap_or("<无 stderr>")
+        )));
+    }
     Ok(())
 }
 
