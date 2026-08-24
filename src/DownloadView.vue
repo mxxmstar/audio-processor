@@ -28,6 +28,7 @@ interface Task {
   status: TaskStatus;
   error: string | null;
   group: TaskGroup | null;
+  cover: string | null;
 }
 
 interface ProgressEvent {
@@ -458,11 +459,19 @@ onUnmounted(() => {
           >
             <template #renderItem="{ item }">
               <a-list-item>
-                <a-card size="small" :bordered="false" class="task-card">
-                  <div class="t-title">
-                    {{ item.title
-                    }}{{ item.part ? " - " + item.part : "" }}
-                  </div>
+                <div class="task-row">
+                  <img
+                    v-if="item.cover"
+                    :src="item.cover"
+                    class="task-cover"
+                    alt="cover"
+                    referrerpolicy="no-referrer"
+                  />
+                  <a-card size="small" :bordered="false" class="task-card">
+                    <div class="t-title">
+                      {{ item.title
+                      }}{{ item.part ? " - " + item.part : "" }}
+                    </div>
                   <div class="t-meta">
                     <a-tag :color="statusColor(item.status)">{{ statusText(item.status) }}</a-tag>
                     <a-tag>{{ item.mode }}</a-tag>
@@ -498,6 +507,7 @@ onUnmounted(() => {
                     size="small"
                   />
                 </a-card>
+                </div>
               </a-list-item>
             </template>
           </a-list>
@@ -534,7 +544,22 @@ onUnmounted(() => {
 .task-list {
   margin-top: 1rem;
 }
+.task-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.8rem;
+  width: 100%;
+}
+.task-cover {
+  width: 96px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  background: #eee;
+}
 .task-card {
+  flex: 1 1 auto;
   width: 100%;
   background: #fafafa;
 }

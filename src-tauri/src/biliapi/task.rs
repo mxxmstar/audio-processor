@@ -83,6 +83,9 @@ pub struct DownloadTask {
     /// 所属分组（合集/系列）；非合集任务为 None
     #[serde(default)]
     pub group: Option<TaskGroup>,
+    /// 视频封面 URL（用于前端展示），无则 None
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 impl DownloadTask {
@@ -110,6 +113,11 @@ impl DownloadTask {
             // （如 "v3"）或默认等于标题，不应覆盖真实标题。
             res.title.clone()
         };
+        let cover = if res.cover.is_empty() {
+            None
+        } else {
+            Some(res.cover.clone())
+        };
         DownloadTask {
             id,
             title,
@@ -120,6 +128,7 @@ impl DownloadTask {
             status: DownloadStatus::Pending,
             error: None,
             group,
+            cover,
         }
     }
 
@@ -515,6 +524,7 @@ mod tests {
             bvid: "BV1xx".into(),
             title: "测试视频".into(),
             pages,
+            cover: String::new(),
         }
     }
 
@@ -566,6 +576,7 @@ mod tests {
                 audio_url: Some("a".into()),
                 actual_format: 80,
             }],
+            cover: String::new(),
         };
         let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp", None);
         assert_eq!(tasks[0].title, "伊利亚的赌注：马斯克曾嘲讽的GPT路线【硅基诗篇5】");
