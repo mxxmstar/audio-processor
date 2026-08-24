@@ -673,12 +673,14 @@ pub async fn bili_start_download(
             for t in tasks_ref.iter() {
                 let subtitle = format!("{} · {}", mode_label(t.mode), status_label(t.status));
                 let payload = serde_json::to_string(t).unwrap_or_default();
+                let file_path = t.output_file().to_string_lossy().to_string();
                 if let Err(e) = crate::history::insert(
                     &conn,
                     crate::history::HistoryKind::Download,
                     &t.title,
                     &subtitle,
                     &payload,
+                    &file_path,
                 ) {
                     eprintln!("[history] 写入下载历史失败: {e}");
                 }

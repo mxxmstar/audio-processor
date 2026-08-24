@@ -48,9 +48,14 @@ pub fn identify(app: AppHandle, path: String) -> Result<SongInfo, String> {
     // 识别成功，写入通用历史库（失败不影响返回结果）
     if let Ok(conn) = history::open_db(&history_dir(&app)) {
         let payload = serde_json::to_string(&result).unwrap_or_default();
-        if let Err(e) =
-            history::insert(&conn, HistoryKind::Recognize, &result.title, &result.artist, &payload)
-        {
+        if let Err(e) = history::insert(
+            &conn,
+            HistoryKind::Recognize,
+            &result.title,
+            &result.artist,
+            &payload,
+            "",
+        ) {
             eprintln!("[history] 写入识别历史失败: {e}");
         }
     }
@@ -75,4 +80,54 @@ pub fn get_history(
 pub fn delete_history(app: AppHandle, id: i64) -> Result<(), String> {
     let conn = history::open_db(&history_dir(&app)).map_err(|e| e.to_string())?;
     history::delete(&conn, id).map_err(|e| e.to_string())
+}
+
+/// 打开本地文件或目录（用于历史记录「打开下载目录」）。
+///
+/// - `path` 为文件时，打开其所在目录并选中该文件；
+/// - `path` 为目录时，直接打开该目录；
+/// - 若路径不存在（如文件已被删除），返回 `Err("文件不存在")`。
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("文件不存在".to_string());
+    }
+
+    // 文件则定位到所在目录并选中；目录则直接打开。
+    let (target, select) = if p.is_dir() {
+        (p.to_path_buf(), None)
+    } else {
+        (
+            p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| p.to_path_buf()),
+            Some(p),
+        )
+    };
+
+    let status = if cfg!(target_os = "windows") {
+        let mut cmd = std::process::Command::new("explorer");
+        if let Some(f) = select {
+            // explorer /select,"path" 可打开目录并选中文件
+            cmd.arg("/select,").arg(f);
+        } else {
+            cmd.arg(&target);
+        }
+        cmd.status()
+    } else if cfg!(target_os = "macos") {
+        let mut cmd = std::process::Command::new("open");
+        if let Some(f) = select {
+            cmd.arg("-R").arg(f);
+        } else {
+            cmd.arg(&target);
+        }
+        cmd.status()
+    } else {
+        std::process::Command::new("xdg-open").arg(&target).status()
+    };
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("打开失败（退出码 {s}）")),
+        Err(e) => Err(format!("打开失败: {e}")),
+    }
 }

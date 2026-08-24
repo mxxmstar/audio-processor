@@ -40,6 +40,7 @@ pub fn run() {
             commands::identify,
             commands::get_history,
             commands::delete_history,
+            commands::open_path,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,

@@ -262,21 +262,16 @@ function isSelected(id: string): boolean {
   return selectedIds.value.has(id);
 }
 
-function toggleSelect(id: string) {
-  const s = new Set(selectedIds.value);
-  if (s.has(id)) s.delete(id);
-  else s.add(id);
-  selectedIds.value = s;
-}
-
 // 全部选择：勾选当前所有任务
 function selectAll() {
   selectedIds.value = new Set(tasks.value.map((t) => t.id));
+  rangeIds.value = new Set();
 }
 
 // 全部取消：清空勾选
 function clearSelection() {
   selectedIds.value = new Set();
+  rangeIds.value = new Set();
 }
 
 // 解析结果写入时，默认全选（保留已有勾选状态，新增任务默认选中）
@@ -284,6 +279,57 @@ function syncSelectionOnTasks() {
   const s = new Set(selectedIds.value);
   for (const t of tasks.value) s.add(t.id);
   selectedIds.value = s;
+  rangeIds.value = new Set();
+}
+
+// 扁平化任务顺序（合集分组后的展示顺序），用于 shift 连续多选的索引定位
+const orderedTaskIds = computed<string[]>(() =>
+  groupedTasks.value.flatMap((g) => g.tasks.map((t) => t.id))
+);
+// 上一次点击的任务索引（shift 多选的锚点）
+const lastTaskIndex = ref(-1);
+// shift 框选的「蓝色临时选中」集合（尚未真正勾选，点击任意勾选框后批量应用）
+const rangeIds = ref<Set<string>>(new Set());
+
+function inRange(id: string): boolean {
+  return rangeIds.value.has(id);
+}
+
+// 任务点击交互：
+// - 普通点击 = 切换单个勾选；若当前存在蓝色框选区，则把点击的勾选状态批量应用到整个框选区后清除
+// - shift+点击 = 以锚点为起点，框选 [锚点, 当前] 区间到 rangeIds（仅高亮，不立即勾选）
+function onTaskClick(id: string, shift: boolean) {
+  const flat = orderedTaskIds.value;
+  const idx = flat.indexOf(id);
+  if (shift) {
+    if (lastTaskIndex.value < 0) lastTaskIndex.value = idx;
+    const [a, b] = idx >= lastTaskIndex.value
+      ? [lastTaskIndex.value, idx]
+      : [idx, lastTaskIndex.value];
+    const s = new Set<string>();
+    for (let i = a; i <= b; i++) s.add(flat[i]);
+    rangeIds.value = s;
+    return;
+  }
+  // 普通点击：若存在蓝色框选区，则批量应用
+  if (rangeIds.value.size > 0) {
+    const target = !isSelected(id); // 以被点击项的「新状态」为准
+    const s = new Set(selectedIds.value);
+    for (const rid of rangeIds.value) {
+      if (target) s.add(rid);
+      else s.delete(rid);
+    }
+    selectedIds.value = s;
+    rangeIds.value = new Set();
+    lastTaskIndex.value = idx;
+    return;
+  }
+  // 无任何选区：切换单个
+  const s = new Set(selectedIds.value);
+  if (s.has(id)) s.delete(id);
+  else s.add(id);
+  selectedIds.value = s;
+  lastTaskIndex.value = idx;
 }
 
 let off1: UnlistenFn | null = null;
@@ -476,6 +522,7 @@ onUnmounted(() => {
         <a-button size="small" @click="selectAll">全部选择</a-button>
         <a-button size="small" @click="clearSelection">全部取消</a-button>
         <span class="sel-count">已选 {{ selectedCount }} / {{ tasks.length }}</span>
+        <span class="sel-tip">提示：按住 Shift 点击可批量选择连续项</span>
       </a-space>
 
       <a-card
@@ -519,11 +566,15 @@ onUnmounted(() => {
           >
             <template #renderItem="{ item }">
               <a-list-item>
-                <div class="task-row">
+                <div
+                  class="task-row"
+                  :class="{ 'is-selected': isSelected(item.id), 'in-range': inRange(item.id) }"
+                  @click="(e: MouseEvent) => onTaskClick(item.id, e.shiftKey)"
+                >
                   <a-checkbox
                     class="task-check"
                     :checked="isSelected(item.id)"
-                    @change="() => toggleSelect(item.id)"
+                    @click.stop="(e: MouseEvent) => onTaskClick(item.id, e.shiftKey)"
                   />
                   <img
                     v-if="item.cover"
@@ -616,11 +667,37 @@ onUnmounted(() => {
   font-size: 0.85rem;
   color: #8a94a6;
 }
+.sel-tip {
+  font-size: 0.8rem;
+  color: #b0b8c4;
+}
 .task-row {
   display: flex;
   align-items: stretch;
   gap: 0.8rem;
   width: 100%;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.2rem 0.3rem;
+  transition: background 0.15s ease;
+  user-select: none;
+}
+.task-row:hover {
+  background: #f3f6fb;
+}
+.task-row.is-selected {
+  background: #e6e6e6;
+}
+.task-row.is-selected .task-card {
+  background: #e6e6e6;
+}
+/* shift 框选的蓝色临时高亮（优先于灰色，表示待批量操作） */
+.task-row.in-range {
+  background: rgba(24, 144, 255, 0.18);
+  box-shadow: inset 0 0 0 2px #1890ff;
+}
+.task-row.in-range .task-card {
+  background: transparent;
 }
 .task-check {
   flex: 0 0 auto;
@@ -633,6 +710,7 @@ onUnmounted(() => {
   object-fit: cover;
   border-radius: 6px;
   flex: 0 0 auto;
+  align-self: center;
   background: #eee;
 }
 .task-card {

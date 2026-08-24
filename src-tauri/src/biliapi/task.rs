@@ -171,6 +171,21 @@ fn sanitize(name: &str) -> String {
     s.trim().to_string()
 }
 
+impl DownloadTask {
+    /// 推算本任务最终落盘的绝对路径（与 `run_task` 内命名规则保持一致）。
+    /// - AudioOnly → `<dir>/<title>.m4a`
+    /// - VideoOnly / Merge → `<dir>/<title>.mp4`
+    pub fn output_file(&self) -> std::path::PathBuf {
+        let dir = Path::new(&self.output_dir);
+        let base = sanitize(&self.title);
+        let ext = match self.mode {
+            DownloadMode::AudioOnly => "m4a",
+            DownloadMode::VideoOnly | DownloadMode::Merge => "mp4",
+        };
+        dir.join(format!("{}.{}", base, ext))
+    }
+}
+
 /// ffmpeg 的探测与合并逻辑已迁移至 [`crate::biliapi::media`] 模块。
 /// 本模块仅保留下载编排，通过 `media::ffmpeg_available` / `media::merge` 调用。
 

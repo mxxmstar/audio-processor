@@ -50,6 +50,8 @@ pub struct HistoryItem {
     pub subtitle: String,
     /// 业务详情的 JSON 字符串（识别为 SongInfo、下载为 DownloadTask）
     pub payload: String,
+    /// 关联文件本地绝对路径（下载类记录为输出文件，识别类记录为空）
+    pub file_path: String,
     pub created_at: String,
 }
 
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS history (
     title       TEXT NOT NULL,
     subtitle    TEXT NOT NULL DEFAULT '',
     payload     TEXT NOT NULL,
+    file_path   TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at DESC);
@@ -72,6 +75,17 @@ pub fn open_db(dir: &std::path::Path) -> SqlResult<Connection> {
     let path = dir.join("history.db");
     let conn = Connection::open(&path)?;
     conn.execute_batch(SCHEMA)?;
+    // 兼容旧库：若已存在的历史表缺少 file_path 列则补加（CREATE TABLE 不会自动变更已有表结构）
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('history') WHERE name = 'file_path'",
+            [],
+            |r| r.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE history ADD COLUMN file_path TEXT NOT NULL DEFAULT ''")?;
+    }
     Ok(conn)
 }
 
@@ -82,10 +96,11 @@ pub fn insert(
     title: &str,
     subtitle: &str,
     payload: &str,
+    file_path: &str,
 ) -> SqlResult<()> {
     conn.execute(
-        "INSERT INTO history (kind, title, subtitle, payload) VALUES (?1, ?2, ?3, ?4)",
-        (kind.as_str(), title, subtitle, payload),
+        "INSERT INTO history (kind, title, subtitle, payload, file_path) VALUES (?1, ?2, ?3, ?4, ?5)",
+        (kind.as_str(), title, subtitle, payload, file_path),
     )?;
     Ok(())
 }
@@ -100,7 +115,7 @@ pub fn list(
     let rows = match kind {
         Some(k) => {
             let mut stmt = conn.prepare(
-                "SELECT id, kind, title, subtitle, payload, created_at
+                "SELECT id, kind, title, subtitle, payload, file_path, created_at
                  FROM history WHERE kind = ?1 ORDER BY created_at DESC LIMIT ?2",
             )?;
             let x = stmt
@@ -110,7 +125,7 @@ pub fn list(
         }
         None => {
             let mut stmt = conn.prepare(
-                "SELECT id, kind, title, subtitle, payload, created_at
+                "SELECT id, kind, title, subtitle, payload, file_path, created_at
                  FROM history ORDER BY created_at DESC LIMIT ?1",
             )?;
             let x = stmt
@@ -125,7 +140,7 @@ pub fn list(
 /// 按 id 取单条。
 pub fn get(conn: &Connection, id: i64) -> SqlResult<Option<HistoryItem>> {
     let mut stmt = conn.prepare(
-        "SELECT id, kind, title, subtitle, payload, created_at FROM history WHERE id = ?1",
+        "SELECT id, kind, title, subtitle, payload, file_path, created_at FROM history WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map([id], map_row)?;
     match rows.next() {
@@ -157,6 +172,7 @@ fn map_row(r: &rusqlite::Row) -> SqlResult<HistoryItem> {
         title: r.get(2)?,
         subtitle: r.get(3)?,
         payload: r.get(4)?,
-        created_at: r.get(5)?,
+        file_path: r.get(5)?,
+        created_at: r.get(6)?,
     })
 }
