@@ -9,6 +9,7 @@ pub mod bili_state; // 阶段 5：B 站功能共享状态（登录态目录 + �
 pub mod history; // 通用历史记录模块（音频识别 / B站下载共用）
 
 use bili_state::BiliState;
+use commands::audio_quality::AudioQualityState;
 use tauri::Manager;
 
 /// Tauri 应用入口（由 `main.rs` 调用）。
@@ -17,6 +18,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(BiliState::new())
+        .manage(AudioQualityState::default())
         .setup(|app| {
             // 阶段 5：注入配置目录到 B 站存储 / WBI 缓存层
             if let Ok(dir) = app.path().app_config_dir() {
@@ -44,6 +46,9 @@ pub fn run() {
             commands::delete_history,
             commands::open_path,
             commands::audio_quality::audio_quality_check_ai_runtime,
+            commands::audio_quality::audio_quality_start,
+            commands::audio_quality::audio_quality_cancel,
+            commands::audio_quality::audio_quality_list_tasks,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,

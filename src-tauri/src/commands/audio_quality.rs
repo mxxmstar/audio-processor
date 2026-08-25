@@ -3,8 +3,90 @@
 //! 当前只提供 AI Worker 运行时握手检查。真实模型和音频处理命令在
 //! Worker 协议稳定后继续实现。
 
-use crate::audio_quality::ai_worker::{self, WorkerSpec, PROTOCOL_VERSION};
+use crate::audio_quality::ai_worker::{
+    self, AiProcessRequest, WorkerError, WorkerEvent, WorkerEventCallback, WorkerSpec,
+    PROTOCOL_VERSION,
+};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, State};
+
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioQualityTask {
+    pub id: String,
+    pub input_path: String,
+    pub output_path: String,
+    pub status: String,
+    pub phase: String,
+    pub percent: f64,
+    pub model_id: String,
+    pub device: String,
+    pub worker_kind: String,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub output_sample_rate: Option<u32>,
+    pub output_channels: Option<u16>,
+    pub output_duration_seconds: Option<f64>,
+}
+
+#[derive(Default, Clone)]
+pub struct AudioQualityState {
+    inner: Arc<Mutex<AudioQualityStore>>,
+}
+
+#[derive(Default)]
+struct AudioQualityStore {
+    tasks: HashMap<String, AudioQualityTask>,
+    cancel_flags: HashMap<String, Arc<AtomicBool>>,
+}
+
+impl AudioQualityState {
+    fn insert(&self, task: AudioQualityTask, cancel: Arc<AtomicBool>) {
+        let mut store = self.inner.lock().expect("audio quality state poisoned");
+        store.cancel_flags.insert(task.id.clone(), cancel);
+        store.tasks.insert(task.id.clone(), task);
+    }
+
+    fn update<F>(&self, id: &str, update: F) -> Option<AudioQualityTask>
+    where
+        F: FnOnce(&mut AudioQualityTask),
+    {
+        let mut store = self.inner.lock().expect("audio quality state poisoned");
+        let task = store.tasks.get_mut(id)?;
+        update(task);
+        Some(task.clone())
+    }
+
+    fn cancel(&self, id: &str) -> bool {
+        let store = self.inner.lock().expect("audio quality state poisoned");
+        let Some(flag) = store.cancel_flags.get(id) else {
+            return false;
+        };
+        flag.store(true, Ordering::Relaxed);
+        true
+    }
+
+    fn list(&self) -> Vec<AudioQualityTask> {
+        let store = self.inner.lock().expect("audio quality state poisoned");
+        let mut tasks: Vec<_> = store.tasks.values().cloned().collect();
+        tasks.sort_by(|a, b| a.id.cmp(&b.id));
+        tasks
+    }
+
+    fn remove_cancel(&self, id: &str) {
+        self.inner
+            .lock()
+            .expect("audio quality state poisoned")
+            .cancel_flags
+            .remove(id);
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +99,24 @@ pub struct AiRuntimeCheck {
     pub worker_version: Option<String>,
     pub models: Vec<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioQualityStartInput {
+    pub input_path: String,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub chunk_seconds: Option<f64>,
+    #[serde(default)]
+    pub overlap_seconds: Option<f64>,
+    #[serde(default)]
+    pub output_sample_rate: Option<u32>,
 }
 
 /// 检查 Python AI Worker 是否能启动并完成 JSONL ready 握手。
@@ -67,5 +167,306 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
             models: Vec::new(),
             error: Some(error.to_string()),
         }),
+    }
+}
+
+/// 启动一个后台 AI 处理任务。真实 Worker 通过 `AUDIO_AI_WORKER` 配置；fake
+/// Worker 只能通过 `AUDIO_AI_USE_FAKE=1` 显式启用，避免生成不可播放的测试文件。
+#[tauri::command]
+pub fn audio_quality_start(
+    input: AudioQualityStartInput,
+    app: AppHandle,
+    state: State<'_, AudioQualityState>,
+) -> Result<AudioQualityTask, String> {
+    let input_path = PathBuf::from(&input.input_path);
+    if !input_path.is_file() {
+        return Err(format!("输入音频不存在: {}", input_path.display()));
+    }
+
+    let output_path =
+        allocate_output_path(&input_path, input.output_path.as_deref().map(Path::new))?;
+    if output_path == input_path {
+        return Err("输出路径不能覆盖输入音频".into());
+    }
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建输出目录失败: {}: {e}", parent.display()))?;
+    }
+
+    let (spec, worker_kind) = select_worker_spec()?;
+    let id = format!(
+        "aq-{}-{}",
+        chrono_like_timestamp(),
+        NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let request = AiProcessRequest {
+        request_id: id.clone(),
+        input_path: input_path.to_string_lossy().into_owned(),
+        output_path: output_path.to_string_lossy().into_owned(),
+        model_id: input.model_id.unwrap_or_else(|| "default".into()),
+        device: input.device.unwrap_or_else(|| "auto".into()),
+        chunk_seconds: input.chunk_seconds.unwrap_or(20.0),
+        overlap_seconds: input.overlap_seconds.unwrap_or(2.0),
+        output_sample_rate: input.output_sample_rate.or(Some(48_000)),
+    };
+    validate_request(&request)?;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = AudioQualityTask {
+        id: id.clone(),
+        input_path: request.input_path.clone(),
+        output_path: request.output_path.clone(),
+        status: "queued".into(),
+        phase: "queued".into(),
+        percent: 0.0,
+        model_id: request.model_id.clone(),
+        device: request.device.clone(),
+        worker_kind,
+        message: None,
+        error: None,
+        output_sample_rate: None,
+        output_channels: None,
+        output_duration_seconds: None,
+    };
+    state.insert(task.clone(), cancel.clone());
+
+    let state_for_task = (*state).clone();
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = state_for_task.update(&id, |task| {
+            task.status = "processing".into();
+            task.phase = "starting".into();
+            task.message = Some("正在启动 Python AI Worker".into());
+        });
+        emit_task_progress(&app_for_task, &state_for_task, &id);
+
+        let state_for_event = state_for_task.clone();
+        let app_for_event = app_for_task.clone();
+        let id_for_event = id.clone();
+        let callback: WorkerEventCallback = Arc::new(move |event| {
+            apply_worker_event(&state_for_event, &id_for_event, event);
+            emit_task_progress(&app_for_event, &state_for_event, &id_for_event);
+        });
+        let result =
+            ai_worker::run_worker_with_callback(&spec, &request, Some(cancel), Some(callback))
+                .await;
+
+        match result {
+            Ok(run) => {
+                let output = Path::new(&run.result.output_path);
+                let valid = output.is_file()
+                    && std::fs::metadata(output)
+                        .map(|metadata| metadata.len() > 0)
+                        .unwrap_or(false);
+                if valid {
+                    let _ = state_for_task.update(&id, |task| {
+                        task.status = "completed".into();
+                        task.phase = "completed".into();
+                        task.percent = 100.0;
+                        task.message = Some("AI 输出已生成".into());
+                        task.output_sample_rate = Some(run.result.sample_rate);
+                        task.output_channels = Some(run.result.channels);
+                        task.output_duration_seconds = Some(run.result.duration_seconds);
+                    });
+                } else {
+                    let _ = state_for_task.update(&id, |task| {
+                        task.status = "failed".into();
+                        task.phase = "verifying".into();
+                        task.error = Some("Worker 返回成功，但输出文件不存在或为空".into());
+                    });
+                }
+            }
+            Err(error) => {
+                let status = if matches!(error, WorkerError::Cancelled) {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                let _ = state_for_task.update(&id, |task| {
+                    task.status = status.into();
+                    task.phase = "finished".into();
+                    task.error = Some(error.to_string());
+                });
+            }
+        }
+        emit_task_progress(&app_for_task, &state_for_task, &id);
+        state_for_task.remove_cancel(&id);
+    });
+
+    Ok(task)
+}
+
+#[tauri::command]
+pub fn audio_quality_cancel(
+    task_id: String,
+    state: State<'_, AudioQualityState>,
+) -> Result<(), String> {
+    if state.cancel(&task_id) {
+        let _ = state.update(&task_id, |task| {
+            task.phase = "cancelling".into();
+            task.message = Some("正在取消 Python AI Worker".into());
+        });
+        Ok(())
+    } else {
+        Err(format!("找不到可取消的音频处理任务: {task_id}"))
+    }
+}
+
+#[tauri::command]
+pub fn audio_quality_list_tasks(
+    state: State<'_, AudioQualityState>,
+) -> Result<Vec<AudioQualityTask>, String> {
+    Ok(state.list())
+}
+
+fn select_worker_spec() -> Result<(WorkerSpec, String), String> {
+    if let Some(path) = std::env::var_os("AUDIO_AI_WORKER") {
+        return Ok((WorkerSpec::new(path), "configured".into()));
+    }
+    if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
+        return WorkerSpec::fake("success")
+            .map(|spec| (spec, "fake".into()))
+            .ok_or_else(|| "找不到 Python 运行时，无法启动 fake Worker".into());
+    }
+    Err(
+        "未配置真实 AI Worker；请设置 AUDIO_AI_WORKER，测试 fake Worker 请设置 AUDIO_AI_USE_FAKE=1"
+            .into(),
+    )
+}
+
+fn validate_request(request: &AiProcessRequest) -> Result<(), String> {
+    if !(request.chunk_seconds.is_finite() && request.chunk_seconds > 0.0) {
+        return Err("chunkSeconds 必须是正数".into());
+    }
+    if !(request.overlap_seconds.is_finite()
+        && request.overlap_seconds >= 0.0
+        && request.overlap_seconds < request.chunk_seconds)
+    {
+        return Err("overlapSeconds 必须大于等于 0 且小于 chunkSeconds".into());
+    }
+    if request.model_id.trim().is_empty() {
+        return Err("modelId 不能为空".into());
+    }
+    Ok(())
+}
+
+fn allocate_output_path(input: &Path, requested: Option<&Path>) -> Result<PathBuf, String> {
+    let candidate = requested
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| input.with_extension("ai.flac"));
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "输出路径缺少父目录".to_string())?;
+    let stem = candidate
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("enhanced");
+    let extension = candidate
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("flac");
+    for index in 0..10_000usize {
+        let name = if index == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem} ({index}).{extension}")
+        };
+        let path = parent.join(name);
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "无法为输出文件分配不冲突的路径: {}",
+        candidate.display()
+    ))
+}
+
+fn apply_worker_event(state: &AudioQualityState, task_id: &str, event: &WorkerEvent) {
+    let _ = state.update(task_id, |task| match event {
+        WorkerEvent::Ready { worker_version, .. } => {
+            task.phase = "ready".into();
+            task.message = Some(format!("Worker 已就绪: {worker_version}"));
+        }
+        WorkerEvent::Progress {
+            phase,
+            percent,
+            message,
+            ..
+        } => {
+            task.status = "processing".into();
+            task.phase = phase.clone();
+            task.percent = percent.clamp(0.0, 100.0);
+            task.message = message.clone();
+        }
+        WorkerEvent::Completed { .. } => {
+            task.phase = "verifying".into();
+            task.percent = 100.0;
+        }
+        WorkerEvent::Error { code, message, .. } => {
+            task.phase = "error".into();
+            task.error = Some(format!("[{code}] {message}"));
+        }
+    });
+}
+
+fn emit_task_progress(app: &AppHandle, state: &AudioQualityState, task_id: &str) {
+    let Some(task) = state.list().into_iter().find(|task| task.id == task_id) else {
+        return;
+    };
+    let _ = app.emit("audio-quality-progress", task);
+}
+
+fn chrono_like_timestamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("audio-processor-quality-command-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn validate_request_rejects_invalid_overlap() {
+        let request = AiProcessRequest {
+            request_id: "test".into(),
+            input_path: "input".into(),
+            output_path: "output".into(),
+            model_id: "model".into(),
+            device: "cpu".into(),
+            chunk_seconds: 2.0,
+            overlap_seconds: 2.0,
+            output_sample_rate: Some(48_000),
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn allocate_output_path_does_not_overwrite_existing_file() {
+        let dir = temp_dir();
+        let input = dir.join("source.m4a");
+        let output = dir.join("enhanced.flac");
+        std::fs::write(&input, b"input").unwrap();
+        std::fs::write(&output, b"existing").unwrap();
+
+        let allocated = allocate_output_path(&input, Some(&output)).unwrap();
+        assert_eq!(allocated, dir.join("enhanced (1).flac"));
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
