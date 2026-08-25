@@ -279,7 +279,11 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     args = parser.parse_args()
-    model_dir = Path(args.model_dir or Path(__file__).resolve().parents[2] / "models")
+    model_dir = Path(
+        args.model_dir
+        or os.environ.get("AUDIO_AI_MODEL_DIR")
+        or Path(__file__).resolve().parents[2] / "models"
+    )
     try:
         install_model(
             model_dir,
