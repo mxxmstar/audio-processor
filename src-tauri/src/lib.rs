@@ -46,6 +46,7 @@ pub fn run() {
             commands::delete_history,
             commands::open_path,
             commands::audio_quality::audio_quality_check_ai_runtime,
+            commands::audio_quality::audio_quality_download_model,
             commands::audio_quality::audio_quality_start,
             commands::audio_quality::audio_quality_cancel,
             commands::audio_quality::audio_quality_list_tasks,

@@ -214,6 +214,24 @@ impl WorkerSpec {
         }
         Some(Self::new(python).arg("-u").arg(script))
     }
+
+    /// 显式模型安装器。它与处理 Worker 共用 Python 运行时，但安装器
+    /// 只负责下载和校验模型，不会启动音频推理或自动联网。
+    pub fn model_manager() -> Option<Self> {
+        if let Some(path) = std::env::var_os("AUDIO_AI_MODEL_MANAGER") {
+            return Some(Self::new(path));
+        }
+        let python = find_python()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai")
+            .join("model_manager.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(Self::new(python).arg("-u").arg(script))
+    }
 }
 
 /// 已完成的 Worker 运行结果和有限事件记录。
@@ -535,6 +553,45 @@ pub async fn probe_worker(spec: &WorkerSpec) -> Result<WorkerReady, WorkerError>
         models,
         model_errors,
     })
+}
+
+/// 运行一次显式模型安装命令，并把安装器 stderr 中的进度行交给调用方。
+pub async fn install_model(
+    spec: &WorkerSpec,
+    model_id: &str,
+    workers: u32,
+    on_progress: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+) -> Result<(), WorkerError> {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .arg("--model-id")
+        .arg(model_id)
+        .arg("--workers")
+        .arg(workers.to_string())
+        .envs(spec.env.iter().map(|(key, value)| (key, value)))
+        .env("PYTHONUNBUFFERED", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    hide_console_window(&mut command);
+
+    let mut child = command.spawn().map_err(WorkerError::Spawn)?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorkerError::Protocol("模型安装器 stderr 未按协议打开".into()))?;
+    let mut lines = BufReader::new(stderr).lines();
+    while let Some(line) = lines.next_line().await.map_err(WorkerError::Stderr)? {
+        if let Some(callback) = &on_progress {
+            callback(&line);
+        }
+    }
+    let status = child.wait().await.map_err(WorkerError::Spawn)?;
+    if !status.success() {
+        return Err(WorkerError::Exited(status.code()));
+    }
+    Ok(())
 }
 
 fn validate_event(event: &WorkerEvent, request: &AiProcessRequest) -> Result<(), WorkerError> {

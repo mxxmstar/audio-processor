@@ -102,6 +102,14 @@ pub struct AiRuntimeCheck {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioQualityModelInstallResult {
+    pub model_id: String,
+    pub status: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioQualityStartInput {
@@ -169,6 +177,36 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
             error: Some(error.to_string()),
         }),
     }
+}
+
+/// 显式下载并校验模型。模型安装不会由音频处理任务自动触发。
+///
+/// `workers` 控制断点 Range 下载并发数，限制在 1..=32；模型路径和
+/// SHA-256 由 Python 安装器从 manifest.json 读取，Rust 不接受外部 URL。
+#[tauri::command]
+pub async fn audio_quality_download_model(
+    model_id: String,
+    workers: Option<u32>,
+) -> Result<AudioQualityModelInstallResult, String> {
+    let model_id = model_id.trim().to_string();
+    if model_id.is_empty() {
+        return Err("modelId 不能为空".into());
+    }
+    let workers = workers.unwrap_or(8).clamp(1, 32);
+    let Some(spec) = WorkerSpec::model_manager() else {
+        return Err("找不到 Python AI 模型安装器或 Python 运行时".into());
+    };
+    let progress: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|line| {
+        eprintln!("[audio-ai-model] {line}");
+    });
+    ai_worker::install_model(&spec, &model_id, workers, Some(progress))
+        .await
+        .map_err(|error| format!("模型安装失败: {error}"))?;
+    Ok(AudioQualityModelInstallResult {
+        model_id,
+        status: "installed".into(),
+        message: "模型已下载并通过 SHA-256 校验".into(),
+    })
 }
 
 fn unavailable_runtime(error: &str) -> AiRuntimeCheck {
