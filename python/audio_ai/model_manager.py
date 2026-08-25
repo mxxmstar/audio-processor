@@ -18,7 +18,7 @@ from typing import Any
 
 
 DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
-DEFAULT_RANGE_BYTES = 64 * 1024 * 1024
+DEFAULT_RANGE_BYTES = 4 * 1024 * 1024
 DEFAULT_RETRIES = 3
 DEFAULT_WORKERS = 8
 
@@ -222,7 +222,9 @@ def install_model(
         return target
 
     part_path = target.with_name(target.name + ".part")
-    parts_dir = target.with_name(target.name + f".parts.{expected_sha256[:16]}")
+    parts_dir = target.with_name(
+        target.name + f".parts.{expected_sha256[:16]}.{DEFAULT_RANGE_BYTES}"
+    )
     part_paths = _download_parts(
         str(entry["source"]),
         part_path,
