@@ -56,9 +56,10 @@ class ModelManagerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             part = target.with_name("model.bin.part")
-            with patch("audio_ai.model_manager._download_part") as download:
+            with patch("audio_ai.model_manager._download_parts") as download:
                 def write_bad_part(*args: object, **kwargs: object) -> None:
                     part.write_bytes(b"wrong")
+                    return [part]
 
                 download.side_effect = write_bad_part
                 with self.assertRaisesRegex(ModelInstallError, "hash mismatch"):
