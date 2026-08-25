@@ -98,6 +98,7 @@ pub struct AiRuntimeCheck {
     pub program: Option<String>,
     pub worker_version: Option<String>,
     pub models: Vec<String>,
+    pub model_errors: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -153,6 +154,7 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
             program: Some(program),
             worker_version: Some(ready.worker_version),
             models: ready.models,
+            model_errors: ready.model_errors,
             error: None,
         }),
         Err(error) => Ok(AiRuntimeCheck {
@@ -163,6 +165,7 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
             program: Some(program),
             worker_version: None,
             models: Vec::new(),
+            model_errors: Vec::new(),
             error: Some(error.to_string()),
         }),
     }
@@ -177,6 +180,7 @@ fn unavailable_runtime(error: &str) -> AiRuntimeCheck {
         program: None,
         worker_version: None,
         models: Vec::new(),
+        model_errors: Vec::new(),
         error: Some(error.into()),
     }
 }

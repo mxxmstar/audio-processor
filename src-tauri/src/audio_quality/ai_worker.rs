@@ -97,6 +97,8 @@ pub enum WorkerEvent {
         request_id: String,
         worker_version: String,
         models: Vec<String>,
+        #[serde(default)]
+        model_errors: Vec<String>,
     },
     Progress {
         protocol_version: u32,
@@ -228,6 +230,7 @@ pub type WorkerEventCallback = Arc<dyn Fn(&WorkerEvent) + Send + Sync>;
 pub struct WorkerReady {
     pub worker_version: String,
     pub models: Vec<String>,
+    pub model_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -496,6 +499,7 @@ pub async fn probe_worker(spec: &WorkerSpec) -> Result<WorkerReady, WorkerError>
     let WorkerEvent::Ready {
         worker_version,
         models,
+        model_errors,
         ..
     } = event
     else {
@@ -529,6 +533,7 @@ pub async fn probe_worker(spec: &WorkerSpec) -> Result<WorkerReady, WorkerError>
     Ok(WorkerReady {
         worker_version,
         models,
+        model_errors,
     })
 }
 

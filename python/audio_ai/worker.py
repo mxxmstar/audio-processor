@@ -9,6 +9,7 @@ not download weights and never treats resampling as AI enhancement.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -191,23 +192,86 @@ def model_candidates(model_id: str, model_dir: Path) -> list[Path]:
     return [model_dir / f"{safe_name}{suffix}" for suffix in (".ts", ".pt", ".pth")]
 
 
-def find_model(model_id: str, model_dir: Path) -> Path:
+def read_manifest(model_dir: Path) -> dict[str, dict[str, str]] | None:
+    manifest_path = Path(
+        os.environ.get("AUDIO_AI_MODEL_MANIFEST", str(model_dir / "manifest.json"))
+    )
+    if not manifest_path.is_file():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        entries = payload.get("models", [])
+        if not isinstance(entries, list):
+            raise ValueError("models must be a list")
+        result = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("model entry must be an object")
+            model_id = str(entry["id"])
+            result[model_id] = {
+                "file": str(entry["file"]),
+                "version": str(entry.get("version", "unknown")),
+                "sha256": str(entry["sha256"]).lower(),
+            }
+        return result
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise WorkerFailure("MODEL_MANIFEST_INVALID", str(error)) from error
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def find_model(model_id: str, model_dir: Path) -> tuple[Path, str]:
+    manifest = read_manifest(model_dir)
+    if manifest is not None:
+        entry = manifest.get(model_id)
+        if entry is None:
+            raise WorkerFailure("MODEL_NOT_FOUND", f"model is not in manifest: {model_id}")
+        candidate = (model_dir / entry["file"]).resolve()
+        if model_dir.resolve() not in candidate.parents:
+            raise WorkerFailure("MODEL_MANIFEST_INVALID", "model file escapes model directory")
+        if not candidate.is_file():
+            raise WorkerFailure("MODEL_NOT_FOUND", f"model file does not exist: {candidate.name}")
+        actual = sha256_file(candidate)
+        if actual != entry["sha256"]:
+            raise WorkerFailure("MODEL_HASH_MISMATCH", f"model hash mismatch: {candidate.name}")
+        return candidate, entry["version"]
+
     configured = os.environ.get("AUDIO_AI_MODEL")
     candidates = [Path(configured)] if configured else model_candidates(model_id, model_dir)
     for candidate in candidates:
         if candidate.is_file():
-            return candidate
+            return candidate, candidate.stem
     raise WorkerFailure("MODEL_NOT_FOUND", f"no TorchScript model found for {model_id}")
 
 
-def available_models(model_dir: Path) -> list[str]:
+def available_models(model_dir: Path) -> tuple[list[str], list[str]]:
+    manifest = read_manifest(model_dir)
+    if manifest is not None:
+        models = []
+        errors = []
+        for model_id, entry in manifest.items():
+            candidate = (model_dir / entry["file"]).resolve()
+            if model_dir.resolve() not in candidate.parents or not candidate.is_file():
+                errors.append(f"{model_id}: MODEL_NOT_FOUND")
+                continue
+            if sha256_file(candidate) != entry["sha256"]:
+                errors.append(f"{model_id}: MODEL_HASH_MISMATCH")
+                continue
+            models.append(model_id)
+        return sorted(models), sorted(errors)
     if not model_dir.is_dir():
-        return []
+        return [], []
     names = set()
     for path in model_dir.iterdir():
         if path.suffix.lower() in {".ts", ".pt", ".pth"}:
             names.add(path.stem)
-    return sorted(names)
+    return sorted(names), []
 
 
 def choose_device(requested: str) -> torch.device:
@@ -266,7 +330,7 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     if sample_rate <= 0 or channels <= 0:
         raise WorkerFailure("UNSUPPORTED_INPUT", "invalid audio sample rate or channel count")
     model_dir = Path(os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models")))
-    model_path = find_model(model_id, model_dir)
+    model_path, model_version = find_model(model_id, model_dir)
     device = choose_device(str(request.get("device", "auto")))
     emit_progress(request_id, "load_model", 5.0, message=f"loading {model_path.name}")
     try:
@@ -336,7 +400,7 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
         "status": "completed",
         "output_path": output_path,
         "model_id": model_id,
-        "model_version": model_path.stem,
+        "model_version": model_version,
         "sample_rate": sample_rate,
         "channels": channels,
         "duration_seconds": audio.shape[1] / sample_rate,
@@ -363,13 +427,18 @@ def main() -> int:
         os.environ["AUDIO_AI_MODEL_DIR"] = args.model_dir
 
     model_dir = Path(os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models")))
+    try:
+        models, model_errors = available_models(model_dir)
+    except WorkerFailure as failure:
+        models, model_errors = [], [f"{failure.code}: {failure}"]
     emit(
         {
             "protocol_version": PROTOCOL_VERSION,
             "request_id": "",
             "type": "ready",
             "worker_version": "torchscript-0.1.0",
-            "models": available_models(model_dir),
+            "models": models,
+            "model_errors": model_errors,
         }
     )
 
