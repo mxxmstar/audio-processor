@@ -38,6 +38,9 @@ bin/ffmpeg.exe
 bin/ffprobe.exe
 bin/ffmpeg
 bin/ffmpeg-*
+models/*.pt
+models/*.pth
+models/*.ts
 bilidown/
 bilidownload/
 

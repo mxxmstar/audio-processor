@@ -199,6 +199,19 @@ impl WorkerSpec {
                 .arg(mode),
         )
     }
+
+    pub fn production() -> Option<Self> {
+        let python = find_python()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai")
+            .join("worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(Self::new(python).arg("-u").arg(script))
+    }
 }
 
 /// 已完成的 Worker 运行结果和有限事件记录。

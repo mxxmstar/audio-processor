@@ -129,27 +129,25 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
     let (spec, worker_kind, production_ready) =
         if let Some(path) = std::env::var_os("AUDIO_AI_WORKER") {
             (WorkerSpec::new(path), "configured".to_string(), true)
-        } else {
+        } else if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
             let Some(spec) = WorkerSpec::fake("success") else {
-                return Ok(AiRuntimeCheck {
-                    available: false,
-                    production_ready: false,
-                    protocol_version: PROTOCOL_VERSION,
-                    worker_kind: "unavailable".into(),
-                    program: None,
-                    worker_version: None,
-                    models: Vec::new(),
-                    error: Some("找不到 Python 运行时，请设置 AUDIO_AI_PYTHON".into()),
-                });
+                return Ok(unavailable_runtime("找不到 Python 运行时"));
             };
             (spec, "fake".to_string(), false)
+        } else {
+            let Some(spec) = WorkerSpec::production() else {
+                return Ok(unavailable_runtime(
+                    "找不到 Python AI Worker 或 Python 运行时",
+                ));
+            };
+            (spec, "python".to_string(), true)
         };
 
     let program = spec.program.to_string_lossy().into_owned();
     match ai_worker::probe_worker(&spec).await {
         Ok(ready) => Ok(AiRuntimeCheck {
             available: true,
-            production_ready,
+            production_ready: production_ready && !ready.models.is_empty(),
             protocol_version: PROTOCOL_VERSION,
             worker_kind,
             program: Some(program),
@@ -167,6 +165,19 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
             models: Vec::new(),
             error: Some(error.to_string()),
         }),
+    }
+}
+
+fn unavailable_runtime(error: &str) -> AiRuntimeCheck {
+    AiRuntimeCheck {
+        available: false,
+        production_ready: false,
+        protocol_version: PROTOCOL_VERSION,
+        worker_kind: "unavailable".into(),
+        program: None,
+        worker_version: None,
+        models: Vec::new(),
+        error: Some(error.into()),
     }
 }
 
@@ -328,10 +339,9 @@ fn select_worker_spec() -> Result<(WorkerSpec, String), String> {
             .map(|spec| (spec, "fake".into()))
             .ok_or_else(|| "找不到 Python 运行时，无法启动 fake Worker".into());
     }
-    Err(
-        "未配置真实 AI Worker；请设置 AUDIO_AI_WORKER，测试 fake Worker 请设置 AUDIO_AI_USE_FAKE=1"
-            .into(),
-    )
+    WorkerSpec::production()
+        .map(|spec| (spec, "python".into()))
+        .ok_or_else(|| "找不到 Python AI Worker 或 Python 运行时".into())
 }
 
 fn validate_request(request: &AiProcessRequest) -> Result<(), String> {
