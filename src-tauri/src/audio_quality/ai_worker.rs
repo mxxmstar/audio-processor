@@ -209,6 +209,8 @@ pub struct WorkerRunOutput {
     pub stderr: String,
 }
 
+pub type WorkerEventCallback = Arc<dyn Fn(&WorkerEvent) + Send + Sync>;
+
 #[derive(Debug, Clone)]
 pub struct WorkerReady {
     pub worker_version: String,
@@ -267,6 +269,16 @@ pub async fn run_worker(
     request: &AiProcessRequest,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<WorkerRunOutput, WorkerError> {
+    run_worker_with_callback(spec, request, cancel, None).await
+}
+
+/// 与 [`run_worker`] 相同，但会在读取每条合法事件后同步调用回调。
+pub async fn run_worker_with_callback(
+    spec: &WorkerSpec,
+    request: &AiProcessRequest,
+    cancel: Option<Arc<AtomicBool>>,
+    on_event: Option<WorkerEventCallback>,
+) -> Result<WorkerRunOutput, WorkerError> {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -317,6 +329,9 @@ pub async fn run_worker(
                 validate_event(&event, request)?;
                 if events.len() < MAX_EVENTS {
                     events.push(event.clone());
+                }
+                if let Some(callback) = &on_event {
+                    callback(&event);
                 }
                 match event {
                     WorkerEvent::Ready { .. } => ready = true,
@@ -675,5 +690,28 @@ mod tests {
         let ready = probe_worker(&spec).await.unwrap();
         assert_eq!(ready.worker_version, "fake-0.1.0");
         assert_eq!(ready.models, vec!["fake-model"]);
+    }
+
+    #[tokio::test]
+    async fn worker_event_callback_receives_progress() {
+        let Some(spec) = WorkerSpec::fake("success") else {
+            eprintln!("skip: Python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let output = dir.join("output.flac.part");
+        let request = AiProcessRequest::new("test-callback", Path::new("input.m4a"), &output);
+        let progress_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress_count_ref = progress_count.clone();
+        let callback: WorkerEventCallback = Arc::new(move |event| {
+            if matches!(event, WorkerEvent::Progress { .. }) {
+                progress_count_ref.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        run_worker_with_callback(&spec, &request, None, Some(callback))
+            .await
+            .unwrap();
+        assert!(progress_count.load(Ordering::Relaxed) > 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
