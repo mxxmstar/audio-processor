@@ -15,6 +15,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 const MAX_PROTOCOL_LINE_BYTES: usize = 1024 * 1024;
 const MAX_EVENTS: usize = 4096;
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 一个 AI 处理请求。路径由 Rust 分配，Python 只执行结构化请求中的路径。
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +76,13 @@ struct ProcessMessage<'a> {
 
 #[derive(Debug, Serialize)]
 struct CancelMessage<'a> {
+    protocol_version: u32,
+    request_id: &'a str,
+    command: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ShutdownMessage<'a> {
     protocol_version: u32,
     request_id: &'a str,
     command: &'static str,
@@ -202,6 +210,12 @@ pub struct WorkerRunOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct WorkerReady {
+    pub worker_version: String,
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct WorkerResult {
     pub output_path: String,
     pub model_id: String,
@@ -234,6 +248,8 @@ pub enum WorkerError {
     Cancelled,
     #[error("AI Worker 未发送 ready 事件")]
     NotReady,
+    #[error("等待 AI Worker ready 超时")]
+    ReadyTimeout,
     #[error("AI Worker 未发送 result 事件")]
     NoResult,
     #[error("AI Worker 输出路径与 Rust 分配路径不一致")]
@@ -405,6 +421,89 @@ pub async fn run_worker(
     })
 }
 
+/// 只启动 Worker 并完成 ready 握手，用于运行时检查，不执行音频处理。
+pub async fn probe_worker(spec: &WorkerSpec) -> Result<WorkerReady, WorkerError> {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .envs(spec.env.iter().map(|(key, value)| (key, value)))
+        .env("PYTHONUNBUFFERED", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_window(&mut command);
+
+    let mut child = command.spawn().map_err(WorkerError::Spawn)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WorkerError::Protocol("AI Worker stdin 未按协议打开".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WorkerError::Protocol("AI Worker stdout 未按协议打开".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorkerError::Protocol("AI Worker stderr 未按协议打开".into()))?;
+    let stderr_task = tokio::spawn(read_stderr(stderr));
+    let mut lines = BufReader::new(stdout).lines();
+    let line = timeout(READY_TIMEOUT, lines.next_line())
+        .await
+        .map_err(|_| WorkerError::ReadyTimeout)?
+        .map_err(WorkerError::Stdout)?
+        .ok_or(WorkerError::NotReady)?;
+    if line.len() > MAX_PROTOCOL_LINE_BYTES {
+        return Err(WorkerError::Protocol("ready 消息超过 1 MiB 限制".into()));
+    }
+    let event: WorkerEvent = serde_json::from_str(&line)
+        .map_err(|e| WorkerError::Protocol(format!("解析 ready JSONL 失败: {e}")))?;
+    if event.protocol_version() != PROTOCOL_VERSION {
+        return Err(WorkerError::Protocol(format!(
+            "协议版本不匹配: {} != {}",
+            event.protocol_version(),
+            PROTOCOL_VERSION
+        )));
+    }
+    let WorkerEvent::Ready {
+        worker_version,
+        models,
+        ..
+    } = event
+    else {
+        return Err(WorkerError::NotReady);
+    };
+
+    write_json_line(
+        &mut stdin,
+        &ShutdownMessage {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "runtime-check",
+            command: "shutdown",
+        },
+    )
+    .await?;
+    drop(stdin);
+    finish_child(&mut child, CHILD_EXIT_TIMEOUT).await;
+    let status = child.wait().await.map_err(WorkerError::Stdout)?;
+    match stderr_task.await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(WorkerError::Stderr(error)),
+        Err(error) => {
+            return Err(WorkerError::Protocol(format!(
+                "读取 AI Worker stderr 任务失败: {error}"
+            )))
+        }
+    }
+    if !status.success() {
+        return Err(WorkerError::Exited(status.code()));
+    }
+    Ok(WorkerReady {
+        worker_version,
+        models,
+    })
+}
+
 fn validate_event(event: &WorkerEvent, request: &AiProcessRequest) -> Result<(), WorkerError> {
     if event.protocol_version() != PROTOCOL_VERSION {
         return Err(WorkerError::Protocol(format!(
@@ -565,5 +664,16 @@ mod tests {
         let error = run_worker(&spec, &request, Some(cancel)).await.unwrap_err();
         assert!(matches!(error, WorkerError::Cancelled));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn fake_worker_ready_probe() {
+        let Some(spec) = WorkerSpec::fake("success") else {
+            eprintln!("skip: Python runtime unavailable");
+            return;
+        };
+        let ready = probe_worker(&spec).await.unwrap();
+        assert_eq!(ready.worker_version, "fake-0.1.0");
+        assert_eq!(ready.models, vec!["fake-model"]);
     }
 }

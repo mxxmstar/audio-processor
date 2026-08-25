@@ -43,6 +43,7 @@ pub fn run() {
             commands::get_history,
             commands::delete_history,
             commands::open_path,
+            commands::audio_quality::audio_quality_check_ai_runtime,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,
