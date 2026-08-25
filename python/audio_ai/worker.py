@@ -1,9 +1,10 @@
-"""TorchScript-backed audio enhancement worker.
+"""Python audio enhancement worker with explicit model backends.
 
-The model contract is intentionally small and explicit: a TorchScript module
-receives a float32 tensor shaped [1, channels, samples] and returns a tensor
-with the same shape. The model must be supplied separately; this worker does
-not download weights and never treats resampling as AI enhancement.
+The default backend is a TorchScript module that receives a float32 tensor
+shaped [1, channels, samples] and returns a tensor with the same shape. A
+manifest can also select a native Python backend such as DeepFilterNet. The
+worker must be supplied model files separately; it does not download weights
+and never treats resampling as AI enhancement.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import types
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,8 @@ import torch
 PROTOCOL_VERSION = 1
 SCRIPT_ROOT = Path(__file__).resolve().parents[2]
 EMIT_LOCK = threading.Lock()
+DEEPFILTER_CACHE_LOCK = threading.Lock()
+DEEPFILTER_CACHE: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
 
 
 class WorkerFailure(Exception):
@@ -208,10 +212,15 @@ def read_manifest(model_dir: Path) -> dict[str, dict[str, str]] | None:
             if not isinstance(entry, dict):
                 raise ValueError("model entry must be an object")
             model_id = str(entry["id"])
+            backend = str(entry.get("backend", "torchscript"))
+            if backend not in {"torchscript", "deepfilternet"}:
+                raise ValueError(f"unsupported model backend: {backend}")
             result[model_id] = {
                 "file": str(entry["file"]),
                 "version": str(entry.get("version", "unknown")),
                 "sha256": str(entry["sha256"]).lower(),
+                "backend": backend,
+                "runtime_path": str(entry.get("runtime_path", "")),
             }
         return result
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -226,7 +235,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def find_model(model_id: str, model_dir: Path) -> tuple[Path, str]:
+def find_model(model_id: str, model_dir: Path) -> tuple[Path, str, str, Path]:
     manifest = read_manifest(model_dir)
     if manifest is not None:
         entry = manifest.get(model_id)
@@ -240,13 +249,26 @@ def find_model(model_id: str, model_dir: Path) -> tuple[Path, str]:
         actual = sha256_file(candidate)
         if actual != entry["sha256"]:
             raise WorkerFailure("MODEL_HASH_MISMATCH", f"model hash mismatch: {candidate.name}")
-        return candidate, entry["version"]
+        backend = entry["backend"]
+        runtime_path = candidate
+        if backend == "deepfilternet":
+            configured_runtime = entry["runtime_path"]
+            if not configured_runtime:
+                raise WorkerFailure("MODEL_MANIFEST_INVALID", "deepfilternet runtime_path is required")
+            runtime_path = (model_dir / configured_runtime).resolve()
+            if model_dir.resolve() not in runtime_path.parents:
+                raise WorkerFailure("MODEL_MANIFEST_INVALID", "model runtime path escapes model directory")
+            if not runtime_path.is_dir():
+                raise WorkerFailure(
+                    "MODEL_NOT_FOUND", f"model runtime directory does not exist: {runtime_path}"
+                )
+        return candidate, entry["version"], backend, runtime_path
 
     configured = os.environ.get("AUDIO_AI_MODEL")
     candidates = [Path(configured)] if configured else model_candidates(model_id, model_dir)
     for candidate in candidates:
         if candidate.is_file():
-            return candidate, candidate.stem
+            return candidate, candidate.stem, "torchscript", candidate
     raise WorkerFailure("MODEL_NOT_FOUND", f"no TorchScript model found for {model_id}")
 
 
@@ -263,6 +285,15 @@ def available_models(model_dir: Path) -> tuple[list[str], list[str]]:
             if sha256_file(candidate) != entry["sha256"]:
                 errors.append(f"{model_id}: MODEL_HASH_MISMATCH")
                 continue
+            if entry["backend"] == "deepfilternet":
+                runtime_path = entry["runtime_path"]
+                if not runtime_path:
+                    errors.append(f"{model_id}: MODEL_MANIFEST_INVALID")
+                    continue
+                runtime = (model_dir / runtime_path).resolve()
+                if model_dir.resolve() not in runtime.parents or not runtime.is_dir():
+                    errors.append(f"{model_id}: MODEL_NOT_FOUND")
+                    continue
             models.append(model_id)
         return sorted(models), sorted(errors)
     if not model_dir.is_dir():
@@ -282,6 +313,101 @@ def choose_device(requested: str) -> torch.device:
     if requested not in {"auto", "cpu"}:
         raise WorkerFailure("UNSUPPORTED_DEVICE", f"unsupported device: {requested}")
     return torch.device("cuda" if requested == "auto" and torch.cuda.is_available() else "cpu")
+
+
+def load_deepfilternet(model_dir: Path, device: torch.device) -> tuple[Any, Any, Any]:
+    """Load DeepFilterNet without relying on its removed torchaudio I/O API."""
+    if os.environ.get("AUDIO_AI_DEBUG") == "1":
+        print(f"deepfilternet import: {model_dir}", file=sys.stderr, flush=True)
+    try:
+        import torchaudio
+    except ImportError as error:
+        raise WorkerFailure("MODEL_RUNTIME_NOT_FOUND", "deepfilternet requires torchaudio") from error
+
+    if not hasattr(torchaudio, "info") and "df.io" not in sys.modules:
+        # DeepFilterNet 0.5.6 imports these symbols for its CLI. The worker
+        # already decodes and encodes through FFmpeg, so only import-time
+        # compatibility is needed with torchaudio 2.11+.
+        io_module = types.ModuleType("df.io")
+        io_module.AudioMetaData = object
+        io_module.load_audio = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("audio loading is handled by the AI worker")
+        )
+        io_module.resample = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("resampling is handled by the AI worker")
+        )
+        io_module.save_audio = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("audio writing is handled by the AI worker")
+        )
+        sys.modules["df.io"] = io_module
+
+    try:
+        from df.config import config
+        from df.enhance import enhance as deepfilter_enhance
+        from df.enhance import init_df
+    except (ImportError, ModuleNotFoundError) as error:
+        raise WorkerFailure(
+            "MODEL_RUNTIME_NOT_FOUND", f"cannot import deepfilternet: {error}"
+        ) from error
+
+    try:
+        model, df_state, _ = init_df(
+            str(model_dir),
+            log_level="ERROR",
+            log_file=None,
+            config_allow_defaults=True,
+        )
+        config.set("DEVICE", str(device), str, section="train")
+        model = model.to(device).eval()
+        if os.environ.get("AUDIO_AI_DEBUG") == "1":
+            print("deepfilternet loaded", file=sys.stderr, flush=True)
+        return model, df_state, deepfilter_enhance
+    except RuntimeError as error:
+        if "out of memory" in str(error).lower():
+            raise WorkerFailure("OUT_OF_MEMORY", str(error)) from error
+        raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
+    except (OSError, ValueError, KeyError) as error:
+        raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
+
+
+def cached_deepfilternet(model_dir: Path, device: torch.device) -> tuple[Any, Any, Any]:
+    key = (str(model_dir.resolve()), str(device))
+    with DEEPFILTER_CACHE_LOCK:
+        cached = DEEPFILTER_CACHE.get(key)
+        if cached is None:
+            cached = load_deepfilternet(model_dir, device)
+            DEEPFILTER_CACHE[key] = cached
+        return cached
+
+
+def infer_deepfilternet(
+    model: Any,
+    df_state: Any,
+    enhance_fn: Any,
+    chunk: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    # DeepFilterNet computes FFT features from CPU NumPy audio and moves only
+    # model features to the selected device.
+    tensor = torch.from_numpy(np.ascontiguousarray(chunk)).float()
+    try:
+        with torch.inference_mode():
+            output = enhance_fn(model, df_state, tensor, pad=True)
+    except RuntimeError as error:
+        if "out of memory" in str(error).lower():
+            raise WorkerFailure("OUT_OF_MEMORY", str(error)) from error
+        raise WorkerFailure("INFERENCE_FAILED", str(error)) from error
+    if not isinstance(output, torch.Tensor):
+        raise WorkerFailure("INFERENCE_FAILED", "deepfilternet output is not a tensor")
+    result = output.detach().float().cpu().numpy()
+    if result.shape != chunk.shape:
+        raise WorkerFailure(
+            "INFERENCE_FAILED",
+            f"model output shape {result.shape} does not match input {chunk.shape}",
+        )
+    if not np.isfinite(result).all():
+        raise WorkerFailure("OUTPUT_INVALID", "model output contains NaN or Inf")
+    return result
 
 
 def infer_chunk(model: torch.jit.ScriptModule, chunk: np.ndarray, device: torch.device) -> np.ndarray:
@@ -330,17 +456,31 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     if sample_rate <= 0 or channels <= 0:
         raise WorkerFailure("UNSUPPORTED_INPUT", "invalid audio sample rate or channel count")
     model_dir = Path(os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models")))
-    model_path, model_version = find_model(model_id, model_dir)
+    model_path, model_version, backend, runtime_path = find_model(model_id, model_dir)
+    if backend == "deepfilternet":
+        if requested_sample_rate not in (None, 48_000):
+            raise WorkerFailure(
+                "UNSUPPORTED_SAMPLE_RATE",
+                "DeepFilterNet requires a 48000 Hz output sample rate",
+            )
+        sample_rate = 48_000
     device = choose_device(str(request.get("device", "auto")))
     emit_progress(request_id, "load_model", 5.0, message=f"loading {model_path.name}")
-    try:
-        model = torch.jit.load(str(model_path), map_location=device)
-        model.eval()
-    except RuntimeError as error:
-        raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
+    if backend == "torchscript":
+        try:
+            model = torch.jit.load(str(runtime_path), map_location=device)
+            model.eval()
+        except RuntimeError as error:
+            raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
+        model_state = None
+        model_infer = None
+    else:
+        model, model_state, model_infer = cached_deepfilternet(runtime_path, device)
 
     if cancel_event.is_set():
         raise WorkerFailure("CANCELLED", "processing cancelled")
+    if os.environ.get("AUDIO_AI_DEBUG") == "1":
+        print("decode audio", file=sys.stderr, flush=True)
     audio = decode_audio(input_path, sample_rate, channels)
     chunk_seconds = float(request.get("chunk_seconds", 20.0))
     overlap_seconds = float(request.get("overlap_seconds", 2.0))
@@ -360,7 +500,14 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
         actual = audio[:, start:end]
         padded = np.zeros((channels, chunk_size), dtype=np.float32)
         padded[:, : actual.shape[1]] = actual
-        predicted = infer_chunk(model, padded, device)
+        if backend == "torchscript":
+            predicted = infer_chunk(model, padded, device)
+        else:
+            if os.environ.get("AUDIO_AI_DEBUG") == "1":
+                print(f"infer chunk {index + 1}/{len(start_list)}", file=sys.stderr, flush=True)
+            predicted = infer_deepfilternet(
+                model, model_state, model_infer, padded, device
+            )
         valid = actual.shape[1]
         blend = np.ones(valid, dtype=np.float32)
         if start > 0:
@@ -436,7 +583,7 @@ def main() -> int:
             "protocol_version": PROTOCOL_VERSION,
             "request_id": "",
             "type": "ready",
-            "worker_version": "torchscript-0.1.0",
+            "worker_version": "python-ai-0.2.0",
             "models": models,
             "model_errors": model_errors,
         }
@@ -455,6 +602,25 @@ def main() -> int:
         if command == "process":
             if active_thread and active_thread.is_alive():
                 emit_error(request_id, WorkerFailure("BUSY", "worker is already processing"))
+                continue
+            # DeepFilterNet initializes global device/logging state. Prepare it
+            # on the protocol thread, then let the worker thread reuse the cache.
+            try:
+                model_dir = Path(
+                    os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models"))
+                )
+                _, _, backend, runtime_path = find_model(
+                    str(request.get("model_id", "")), model_dir
+                )
+                if backend == "deepfilternet":
+                    cached_deepfilternet(
+                        runtime_path, choose_device(str(request.get("device", "auto")))
+                    )
+            except WorkerFailure as failure:
+                emit_error(request_id, failure)
+                continue
+            except Exception as error:
+                emit_error(request_id, WorkerFailure("MODEL_LOAD_FAILED", str(error)))
                 continue
             cancel_event.clear()
             active_thread = threading.Thread(

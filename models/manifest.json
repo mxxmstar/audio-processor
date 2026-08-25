@@ -1,4 +1,15 @@
 {
   "manifest_version": 1,
-  "models": []
+  "models": [
+    {
+      "id": "deepfilternet2-speech",
+      "backend": "deepfilternet",
+      "version": "0.5.6-model-96",
+      "file": "cache/DeepFilterNet2.zip",
+      "runtime_path": "cache/DeepFilterNet2-extracted/DeepFilterNet2",
+      "sha256": "850e695d1c27f2a7b4dcd89b16bc8d49367effc680b1369e995e31d46376cba7",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://github.com/Rikorose/DeepFilterNet/tree/main/models/DeepFilterNet2.zip"
+    }
+  ]
 }

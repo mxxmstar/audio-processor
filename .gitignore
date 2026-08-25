@@ -41,6 +41,9 @@ bin/ffmpeg-*
 models/*.pt
 models/*.pth
 models/*.ts
+models/*.zip
+models/*.tar.gz
+models/cache/
 bilidown/
 bilidownload/
 
