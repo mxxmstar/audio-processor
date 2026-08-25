@@ -1,5 +1,6 @@
 // 子模块声明
 pub mod audio_rename; // 音频命名、冲突处理和本地文件移动
+pub mod audio_quality; // Python AI 音频增强与 Worker 协议
 pub mod commands; // Tauri 命令（桥接层，仅负责前端调用与 fpcalc 资源路径解析）
 pub mod recognizer; // 音频识别独立模块（指纹/查询/错误集中于此，与 Tauri 解耦）
 pub mod http_client; // HTTP 客户端封装（用于向外部服务器如 B 站发送请求）
