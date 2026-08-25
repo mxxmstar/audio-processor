@@ -214,14 +214,20 @@ pub fn audio_quality_start(
         chrono_like_timestamp(),
         NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
     );
+    let model_id = input.model_id.unwrap_or_else(|| "audiosr-basic".into());
+    let (default_chunk_seconds, default_overlap_seconds) = if model_id == "audiosr-basic" {
+        (10.24, 1.28)
+    } else {
+        (20.0, 2.0)
+    };
     let request = AiProcessRequest {
         request_id: id.clone(),
         input_path: input_path.to_string_lossy().into_owned(),
         output_path: output_path.to_string_lossy().into_owned(),
-        model_id: input.model_id.unwrap_or_else(|| "default".into()),
+        model_id,
         device: input.device.unwrap_or_else(|| "auto".into()),
-        chunk_seconds: input.chunk_seconds.unwrap_or(20.0),
-        overlap_seconds: input.overlap_seconds.unwrap_or(2.0),
+        chunk_seconds: input.chunk_seconds.unwrap_or(default_chunk_seconds),
+        overlap_seconds: input.overlap_seconds.unwrap_or(default_overlap_seconds),
         output_sample_rate: input.output_sample_rate.or(Some(48_000)),
     };
     validate_request(&request)?;

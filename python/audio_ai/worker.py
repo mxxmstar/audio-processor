@@ -1,21 +1,22 @@
-"""Python audio enhancement worker with explicit model backends.
+"""Python audio enhancement worker with explicit local model backends.
 
-The default backend is a TorchScript module that receives a float32 tensor
-shaped [1, channels, samples] and returns a tensor with the same shape. A
-manifest can also select a native Python backend such as DeepFilterNet. The
-worker must be supplied model files separately; it does not download weights
-and never treats resampling as AI enhancement.
+TorchScript models receive a float32 tensor shaped [1, channels, samples].
+The manifest can instead select native Python backends such as DeepFilterNet
+or AudioSR. The worker must be supplied model files separately; it does not
+download weights and never treats resampling as AI enhancement.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import types
 from pathlib import Path
@@ -30,6 +31,15 @@ SCRIPT_ROOT = Path(__file__).resolve().parents[2]
 EMIT_LOCK = threading.Lock()
 DEEPFILTER_CACHE_LOCK = threading.Lock()
 DEEPFILTER_CACHE: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
+AUDIOSR_CACHE_LOCK = threading.Lock()
+AUDIOSR_CACHE: dict[tuple[str, str, str], tuple[Any, Any]] = {}
+
+# AudioSR warns about degraded quality for inputs longer than this. Keeping
+# inference windows within the model's intended duration also bounds memory.
+AUDIOSR_MAX_CHUNK_SECONDS = 10.24
+AUDIOSR_DDIM_STEPS = 50
+AUDIOSR_GUIDANCE_SCALE = 3.5
+STARTUP_HASH_MAX_BYTES = 128 * 1024 * 1024
 
 
 class WorkerFailure(Exception):
@@ -213,15 +223,22 @@ def read_manifest(model_dir: Path) -> dict[str, dict[str, str]] | None:
                 raise ValueError("model entry must be an object")
             model_id = str(entry["id"])
             backend = str(entry.get("backend", "torchscript"))
-            if backend not in {"torchscript", "deepfilternet"}:
+            if backend not in {"torchscript", "deepfilternet", "audiosr"}:
                 raise ValueError(f"unsupported model backend: {backend}")
-            result[model_id] = {
+            parsed = {
                 "file": str(entry["file"]),
                 "version": str(entry.get("version", "unknown")),
                 "sha256": str(entry["sha256"]).lower(),
                 "backend": backend,
                 "runtime_path": str(entry.get("runtime_path", "")),
+                "model_name": str(entry.get("model_name", "")),
+                "size_bytes": str(entry.get("size_bytes", "")),
             }
+            if backend == "audiosr" and not parsed["model_name"]:
+                raise ValueError("audiosr model_name is required")
+            if parsed["size_bytes"] and int(parsed["size_bytes"]) <= 0:
+                raise ValueError("size_bytes must be a positive integer")
+            result[model_id] = parsed
         return result
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise WorkerFailure("MODEL_MANIFEST_INVALID", str(error)) from error
@@ -235,7 +252,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def find_model(model_id: str, model_dir: Path) -> tuple[Path, str, str, Path]:
+def find_model(model_id: str, model_dir: Path) -> tuple[Path, str, str, Path, str]:
     manifest = read_manifest(model_dir)
     if manifest is not None:
         entry = manifest.get(model_id)
@@ -246,6 +263,9 @@ def find_model(model_id: str, model_dir: Path) -> tuple[Path, str, str, Path]:
             raise WorkerFailure("MODEL_MANIFEST_INVALID", "model file escapes model directory")
         if not candidate.is_file():
             raise WorkerFailure("MODEL_NOT_FOUND", f"model file does not exist: {candidate.name}")
+        expected_size = entry["size_bytes"]
+        if expected_size and candidate.stat().st_size != int(expected_size):
+            raise WorkerFailure("MODEL_SIZE_MISMATCH", f"model size mismatch: {candidate.name}")
         actual = sha256_file(candidate)
         if actual != entry["sha256"]:
             raise WorkerFailure("MODEL_HASH_MISMATCH", f"model hash mismatch: {candidate.name}")
@@ -262,13 +282,13 @@ def find_model(model_id: str, model_dir: Path) -> tuple[Path, str, str, Path]:
                 raise WorkerFailure(
                     "MODEL_NOT_FOUND", f"model runtime directory does not exist: {runtime_path}"
                 )
-        return candidate, entry["version"], backend, runtime_path
+        return candidate, entry["version"], backend, runtime_path, entry["model_name"]
 
     configured = os.environ.get("AUDIO_AI_MODEL")
     candidates = [Path(configured)] if configured else model_candidates(model_id, model_dir)
     for candidate in candidates:
         if candidate.is_file():
-            return candidate, candidate.stem, "torchscript", candidate
+            return candidate, candidate.stem, "torchscript", candidate, ""
     raise WorkerFailure("MODEL_NOT_FOUND", f"no TorchScript model found for {model_id}")
 
 
@@ -281,6 +301,17 @@ def available_models(model_dir: Path) -> tuple[list[str], list[str]]:
             candidate = (model_dir / entry["file"]).resolve()
             if model_dir.resolve() not in candidate.parents or not candidate.is_file():
                 errors.append(f"{model_id}: MODEL_NOT_FOUND")
+                continue
+            expected_size = entry["size_bytes"]
+            if expected_size and candidate.stat().st_size != int(expected_size):
+                errors.append(f"{model_id}: MODEL_SIZE_MISMATCH")
+                continue
+            if candidate.stat().st_size > STARTUP_HASH_MAX_BYTES:
+                # A multi-gigabyte SHA-256 before ready would exceed Rust's
+                # short startup timeout. The same checksum is always verified
+                # in find_model immediately before the model is loaded.
+                models.append(model_id)
+                errors.append(f"{model_id}: MODEL_HASH_DEFERRED")
                 continue
             if sha256_file(candidate) != entry["sha256"]:
                 errors.append(f"{model_id}: MODEL_HASH_MISMATCH")
@@ -380,6 +411,117 @@ def cached_deepfilternet(model_dir: Path, device: torch.device) -> tuple[Any, An
         return cached
 
 
+def load_audiosr(
+    checkpoint_path: Path, model_name: str, device: torch.device
+) -> tuple[Any, Any]:
+    """Load AudioSR without allowing its helper to fetch a checkpoint."""
+    if os.environ.get("AUDIO_AI_DEBUG") == "1":
+        print(f"audiosr import: {checkpoint_path}", file=sys.stderr, flush=True)
+    try:
+        from audiosr import pipeline as audiosr_pipeline
+    except Exception as error:  # AudioSR import can fail on incompatible native deps.
+        raise WorkerFailure(
+            "MODEL_RUNTIME_NOT_FOUND", f"cannot import audiosr: {error}"
+        ) from error
+
+    original_download_checkpoint = audiosr_pipeline.download_checkpoint
+
+    def local_checkpoint(requested_model_name: str) -> str:
+        if requested_model_name != model_name:
+            raise RuntimeError(
+                f"AudioSR requested unexpected model: {requested_model_name}"
+            )
+        return str(checkpoint_path)
+
+    try:
+        # AudioSR 0.0.7 ignores build_model(ckpt_path=...) and unconditionally
+        # calls its module-level downloader. Patch only for this load and restore
+        # it immediately, so an enhancement request can never fetch weights.
+        audiosr_pipeline.download_checkpoint = local_checkpoint
+        with contextlib.redirect_stdout(sys.stderr):
+            model = audiosr_pipeline.build_model(
+                device=device, model_name=model_name
+            )
+        if os.environ.get("AUDIO_AI_DEBUG") == "1":
+            print("audiosr loaded", file=sys.stderr, flush=True)
+        return model, audiosr_pipeline.super_resolution
+    except RuntimeError as error:
+        if "out of memory" in str(error).lower():
+            raise WorkerFailure("OUT_OF_MEMORY", str(error)) from error
+        raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
+    except (OSError, ValueError, KeyError) as error:
+        raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
+    finally:
+        audiosr_pipeline.download_checkpoint = original_download_checkpoint
+
+
+def cached_audiosr(
+    checkpoint_path: Path, model_name: str, device: torch.device
+) -> tuple[Any, Any]:
+    key = (str(checkpoint_path.resolve()), model_name, str(device))
+    with AUDIOSR_CACHE_LOCK:
+        cached = AUDIOSR_CACHE.get(key)
+        if cached is None:
+            cached = load_audiosr(checkpoint_path, model_name, device)
+            AUDIOSR_CACHE[key] = cached
+        return cached
+
+
+def infer_audiosr(
+    model: Any,
+    super_resolution_fn: Any,
+    chunk: np.ndarray,
+    temporary_dir: Path,
+    chunk_index: int,
+    channel_index: int,
+) -> np.ndarray:
+    """Run AudioSR on one mono chunk and trim its internal duration padding."""
+    if chunk.shape[0] != 1:
+        raise WorkerFailure("INFERENCE_FAILED", "audiosr input must be mono")
+    input_path = temporary_dir / f"chunk-{chunk_index:05d}-channel-{channel_index}.wav"
+    encode_audio(chunk, str(input_path), 48_000, 1)
+    try:
+        # AudioSR and its dependencies may print progress/logs. stdout belongs
+        # exclusively to this worker's JSONL protocol.
+        with contextlib.redirect_stdout(sys.stderr):
+            predicted = super_resolution_fn(
+                model,
+                str(input_path),
+                seed=42,
+                ddim_steps=AUDIOSR_DDIM_STEPS,
+                guidance_scale=AUDIOSR_GUIDANCE_SCALE,
+            )
+    except RuntimeError as error:
+        if "out of memory" in str(error).lower():
+            raise WorkerFailure("OUT_OF_MEMORY", str(error)) from error
+        raise WorkerFailure("INFERENCE_FAILED", str(error)) from error
+    except (OSError, ValueError) as error:
+        raise WorkerFailure("INFERENCE_FAILED", str(error)) from error
+
+    if isinstance(predicted, torch.Tensor):
+        result = predicted.detach().float().cpu().numpy()
+    else:
+        result = np.asarray(predicted, dtype=np.float32)
+    if result.ndim == 3 and result.shape[:2] == (1, 1):
+        result = result[0, 0]
+    elif result.ndim == 2 and result.shape[0] == 1:
+        result = result[0]
+    elif result.ndim != 1:
+        raise WorkerFailure(
+            "INFERENCE_FAILED",
+            f"audiosr output has unsupported shape {result.shape}",
+        )
+    if result.size < chunk.shape[1]:
+        raise WorkerFailure(
+            "OUTPUT_INVALID",
+            "audiosr output is shorter than its input chunk",
+        )
+    result = np.ascontiguousarray(result[: chunk.shape[1]], dtype=np.float32)
+    if not np.isfinite(result).all():
+        raise WorkerFailure("OUTPUT_INVALID", "audiosr output contains NaN or Inf")
+    return result.reshape(1, -1)
+
+
 def infer_deepfilternet(
     model: Any,
     df_state: Any,
@@ -456,12 +598,14 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     if sample_rate <= 0 or channels <= 0:
         raise WorkerFailure("UNSUPPORTED_INPUT", "invalid audio sample rate or channel count")
     model_dir = Path(os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models")))
-    model_path, model_version, backend, runtime_path = find_model(model_id, model_dir)
-    if backend == "deepfilternet":
+    model_path, model_version, backend, runtime_path, model_name = find_model(
+        model_id, model_dir
+    )
+    if backend in {"deepfilternet", "audiosr"}:
         if requested_sample_rate not in (None, 48_000):
             raise WorkerFailure(
                 "UNSUPPORTED_SAMPLE_RATE",
-                "DeepFilterNet requires a 48000 Hz output sample rate",
+                f"{backend} requires a 48000 Hz output sample rate",
             )
         sample_rate = 48_000
     device = choose_device(str(request.get("device", "auto")))
@@ -474,8 +618,11 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
             raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
         model_state = None
         model_infer = None
-    else:
+    elif backend == "deepfilternet":
         model, model_state, model_infer = cached_deepfilternet(runtime_path, device)
+    else:
+        model, model_infer = cached_audiosr(model_path, model_name, device)
+        model_state = None
 
     if cancel_event.is_set():
         raise WorkerFailure("CANCELLED", "processing cancelled")
@@ -484,6 +631,17 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     audio = decode_audio(input_path, sample_rate, channels)
     chunk_seconds = float(request.get("chunk_seconds", 20.0))
     overlap_seconds = float(request.get("overlap_seconds", 2.0))
+    if backend == "audiosr" and chunk_seconds > AUDIOSR_MAX_CHUNK_SECONDS:
+        chunk_seconds = AUDIOSR_MAX_CHUNK_SECONDS
+        emit_progress(
+            request_id,
+            "prepare_input",
+            8.0,
+            message=(
+                "AudioSR chunks are limited to "
+                f"{AUDIOSR_MAX_CHUNK_SECONDS:.2f} seconds"
+            ),
+        )
     chunk_size = max(1, int(chunk_seconds * sample_rate))
     overlap = min(chunk_size - 1, max(0, int(overlap_seconds * sample_rate)))
     step = chunk_size - overlap
@@ -493,40 +651,68 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     starts = range(0, audio.shape[1], step)
     start_list = list(starts)
 
-    for index, start in enumerate(start_list):
-        if cancel_event.is_set():
-            raise WorkerFailure("CANCELLED", "processing cancelled")
-        end = min(audio.shape[1], start + chunk_size)
-        actual = audio[:, start:end]
-        padded = np.zeros((channels, chunk_size), dtype=np.float32)
-        padded[:, : actual.shape[1]] = actual
-        if backend == "torchscript":
-            predicted = infer_chunk(model, padded, device)
-        else:
-            if os.environ.get("AUDIO_AI_DEBUG") == "1":
-                print(f"infer chunk {index + 1}/{len(start_list)}", file=sys.stderr, flush=True)
-            predicted = infer_deepfilternet(
-                model, model_state, model_infer, padded, device
+    temporary_dir_context = (
+        tempfile.TemporaryDirectory(prefix="audio-processor-audiosr-")
+        if backend == "audiosr"
+        else None
+    )
+    try:
+        for index, start in enumerate(start_list):
+            if cancel_event.is_set():
+                raise WorkerFailure("CANCELLED", "processing cancelled")
+            end = min(audio.shape[1], start + chunk_size)
+            actual = audio[:, start:end]
+            if backend == "audiosr":
+                predicted = np.zeros_like(actual)
+                temporary_dir = Path(temporary_dir_context.name)
+                for channel_index in range(channels):
+                    if cancel_event.is_set():
+                        raise WorkerFailure("CANCELLED", "processing cancelled")
+                    predicted[channel_index : channel_index + 1] = infer_audiosr(
+                        model,
+                        model_infer,
+                        actual[channel_index : channel_index + 1],
+                        temporary_dir,
+                        index,
+                        channel_index,
+                    )
+            else:
+                padded = np.zeros((channels, chunk_size), dtype=np.float32)
+                padded[:, : actual.shape[1]] = actual
+                if backend == "torchscript":
+                    predicted = infer_chunk(model, padded, device)
+                else:
+                    if os.environ.get("AUDIO_AI_DEBUG") == "1":
+                        print(
+                            f"infer chunk {index + 1}/{len(start_list)}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    predicted = infer_deepfilternet(
+                        model, model_state, model_infer, padded, device
+                    )
+            valid = actual.shape[1]
+            blend = np.ones(valid, dtype=np.float32)
+            if start > 0:
+                blend[: min(overlap, valid)] = np.linspace(
+                    0.0, 1.0, min(overlap, valid), endpoint=False, dtype=np.float32
+                )
+            if end < audio.shape[1]:
+                blend[-min(overlap, valid) :] *= np.linspace(
+                    1.0, 0.0, min(overlap, valid), endpoint=False, dtype=np.float32
+                )
+            output[:, start:end] += predicted[:, :valid] * blend
+            weights[:, start:end] += blend
+            emit_progress(
+                request_id,
+                "inference",
+                10.0 + 80.0 * (index + 1) / max(1, len(start_list)),
+                processed_seconds=end / sample_rate,
+                total_seconds=total_seconds or source_duration,
             )
-        valid = actual.shape[1]
-        blend = np.ones(valid, dtype=np.float32)
-        if start > 0:
-            blend[: min(overlap, valid)] = np.linspace(
-                0.0, 1.0, min(overlap, valid), endpoint=False, dtype=np.float32
-            )
-        if end < audio.shape[1]:
-            blend[-min(overlap, valid) :] *= np.linspace(
-                1.0, 0.0, min(overlap, valid), endpoint=False, dtype=np.float32
-            )
-        output[:, start:end] += predicted[:, :valid] * blend
-        weights[:, start:end] += blend
-        emit_progress(
-            request_id,
-            "inference",
-            10.0 + 80.0 * (index + 1) / max(1, len(start_list)),
-            processed_seconds=end / sample_rate,
-            total_seconds=total_seconds or source_duration,
-        )
+    finally:
+        if temporary_dir_context is not None:
+            temporary_dir_context.cleanup()
 
     output /= np.maximum(weights, 1e-8)
     if not np.isfinite(output).all():
@@ -583,7 +769,7 @@ def main() -> int:
             "protocol_version": PROTOCOL_VERSION,
             "request_id": "",
             "type": "ready",
-            "worker_version": "python-ai-0.2.0",
+            "worker_version": "python-ai-0.3.0",
             "models": models,
             "model_errors": model_errors,
         }
@@ -609,7 +795,7 @@ def main() -> int:
                 model_dir = Path(
                     os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models"))
                 )
-                _, _, backend, runtime_path = find_model(
+                _, _, backend, runtime_path, _ = find_model(
                     str(request.get("model_id", "")), model_dir
                 )
                 if backend == "deepfilternet":
