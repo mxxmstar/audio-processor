@@ -623,6 +623,47 @@ fn quality_output_path(task: &DownloadTask) -> std::path::PathBuf {
     output
 }
 
+const AI_MASTER_DURATION_TOLERANCE_SECONDS: f64 = 0.1;
+
+fn validate_ai_master_output(
+    input: &media::AudioProbe,
+    output: &media::AudioProbe,
+    worker_result: &ai_worker::WorkerResult,
+) -> Result<(), WorkerError> {
+    if !output.codec_name.eq_ignore_ascii_case("flac") {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 编码器错误: 期望 flac，实际 {}",
+            output.codec_name
+        )));
+    }
+    if worker_result.sample_rate != 48_000 || output.sample_rate != worker_result.sample_rate {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 采样率不一致: Worker {} Hz，文件 {} Hz",
+            worker_result.sample_rate, output.sample_rate
+        )));
+    }
+    if worker_result.channels != input.channels || output.channels != input.channels {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 声道数不一致: 输入 {}，Worker {}，文件 {}",
+            input.channels, worker_result.channels, output.channels
+        )));
+    }
+    if output.duration_seconds <= 0.0
+        || (output.duration_seconds - input.duration_seconds).abs()
+            > AI_MASTER_DURATION_TOLERANCE_SECONDS
+        || (output.duration_seconds - worker_result.duration_seconds).abs()
+            > AI_MASTER_DURATION_TOLERANCE_SECONDS
+    {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 时长不一致: 输入 {:.3}s，Worker {:.3}s，文件 {:.3}s",
+            input.duration_seconds,
+            worker_result.duration_seconds,
+            output.duration_seconds
+        )));
+    }
+    Ok(())
+}
+
 async fn enhance_audio_task(
     app: &AppHandle,
     task: &mut DownloadTask,
@@ -630,6 +671,9 @@ async fn enhance_audio_task(
     staged: &Path,
 ) -> Result<std::path::PathBuf, WorkerError> {
     let output = quality_output_path(task);
+    let input_probe = media::probe_audio(staged).map_err(|error| {
+        WorkerError::Protocol(format!("无法探测 AI 输入文件: {error}"))
+    })?;
     let Some(spec) = enhancement_worker_spec() else {
         return Err(WorkerError::Spawn(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -683,6 +727,10 @@ async fn enhance_audio_task(
             "AI Worker 返回的输出文件不存在或为空".into(),
         ));
     }
+    let output_probe = media::probe_audio(&output).map_err(|error| {
+        WorkerError::Protocol(format!("无法探测 AI master: {error}"))
+    })?;
+    validate_ai_master_output(&input_probe, &output_probe, &run.result)?;
     Ok(output)
 }
 
@@ -1513,6 +1561,49 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(|name| name.starts_with(".audio-processor-")));
+    }
+
+    fn audio_probe(codec_name: &str, sample_rate: u32, channels: u16, duration: f64) -> media::AudioProbe {
+        media::AudioProbe {
+            codec_name: codec_name.into(),
+            sample_rate,
+            channels,
+            duration_seconds: duration,
+        }
+    }
+
+    fn ai_worker_result(sample_rate: u32, channels: u16, duration: f64) -> ai_worker::WorkerResult {
+        ai_worker::WorkerResult {
+            output_path: "master.flac".into(),
+            model_id: "audiosr-basic".into(),
+            model_version: "test".into(),
+            sample_rate,
+            channels,
+            duration_seconds: duration,
+            peak_db: -6.0,
+        }
+    }
+
+    #[test]
+    fn ai_master_validation_accepts_matching_flac() {
+        let input = audio_probe("aac", 44_100, 2, 10.24);
+        let output = audio_probe("flac", 48_000, 2, 10.25);
+        let result = ai_worker_result(48_000, 2, 10.24);
+        assert!(validate_ai_master_output(&input, &output, &result).is_ok());
+    }
+
+    #[test]
+    fn ai_master_validation_rejects_invalid_output_parameters() {
+        let input = audio_probe("aac", 44_100, 2, 10.24);
+        let result = ai_worker_result(48_000, 2, 10.24);
+        for output in [
+            audio_probe("wav", 48_000, 2, 10.24),
+            audio_probe("flac", 44_100, 2, 10.24),
+            audio_probe("flac", 48_000, 1, 10.24),
+            audio_probe("flac", 48_000, 2, 9.0),
+        ] {
+            assert!(validate_ai_master_output(&input, &output, &result).is_err());
+        }
     }
 
     #[test]
