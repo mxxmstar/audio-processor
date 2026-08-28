@@ -123,9 +123,18 @@ pub fn clear_wbi(dir: Option<&Path>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn tmp_dir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!("ap_storage_test_{}", now_secs()));
+        let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "ap_storage_test_{}_{}_{}",
+            std::process::id(),
+            now_secs(),
+            sequence
+        ));
         let _ = std::fs::create_dir_all(&p);
         p
     }
