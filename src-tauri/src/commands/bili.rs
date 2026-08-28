@@ -783,10 +783,6 @@ async fn postprocess_audio_task(
     ) {
         task.recognition_status = RecognitionStatus::RenameFailed;
         task.recognition_error = Some(e.to_string());
-        if source_for_encode != staged {
-            let _ = std::fs::remove_file(&source_for_encode);
-            task.quality_output_path = None;
-        }
         // ffmpeg 不可用时仍保留可播放的原始 m4a，并去掉 .part 后缀。
         match audio_rename::move_to_unique(&staged, &dir, &source_title, "m4a") {
             Ok(path) => {
