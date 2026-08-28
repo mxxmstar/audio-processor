@@ -20,6 +20,14 @@ type RecognitionStatus =
   | "BelowThreshold"
   | "Failed"
   | "RenameFailed";
+type QualityStatus =
+  | "Disabled"
+  | "Pending"
+  | "CheckingRuntime"
+  | "LoadingModel"
+  | "Enhancing"
+  | "Completed"
+  | "Failed";
 
 interface TaskGroup {
   id: string;
@@ -46,13 +54,17 @@ interface Task {
     confidence: number;
   } | null;
   recognition_error?: string | null;
+  quality_status?: QualityStatus;
+  quality_model_id?: string | null;
+  quality_output_path?: string | null;
+  quality_error?: string | null;
   output_path?: string | null;
   group: TaskGroup | null;
   cover: string | null;
 }
 
 interface ProgressEvent {
-  phase: string; // "resolve" | "download" | "recognize" | "rename"
+  phase: string; // "resolve" | "download" | "recognize" | "rename" | "enhance"
   task_id: string;
   title: string;
   status: string;
@@ -64,6 +76,10 @@ interface ProgressEvent {
   source_title: string;
   output_path: string | null;
   confidence: number | null;
+  quality_status?: QualityStatus;
+  quality_model_id?: string | null;
+  quality_output_path?: string | null;
+  quality_error?: string | null;
 }
 
 interface ResolveFinished {
@@ -83,6 +99,8 @@ const mode = ref<"audio" | "video" | "merge">("audio");
 const outputDir = ref("");
 const autoRename = ref(true);
 const confidenceThreshold = ref(70);
+const pythonAiEnhancementEnabled = ref(false);
+const pythonAiModelId = ref("audiosr-basic");
 
 const tasks = ref<Task[]>([]);
 const resolving = ref(false);
@@ -201,6 +219,42 @@ function recognitionColor(s?: RecognitionStatus): string {
   }
 }
 
+function qualityText(s?: QualityStatus): string {
+  switch (s) {
+    case "CheckingRuntime": return "检查 AI 运行时";
+    case "LoadingModel": return "加载 AI 模型";
+    case "Enhancing": return "AI 增强中";
+    case "Completed": return "AI 增强完成";
+    case "Failed": return "AI 增强失败";
+    case "Disabled": return "未启用 AI";
+    default: return "等待 AI 增强";
+  }
+}
+
+function qualityColor(s?: QualityStatus): string {
+  switch (s) {
+    case "Completed": return "success";
+    case "CheckingRuntime":
+    case "LoadingModel":
+    case "Enhancing": return "processing";
+    case "Failed": return "error";
+    default: return "default";
+  }
+}
+
+function downloadInput() {
+  return {
+    outputDir: outputDir.value || null,
+    concurrency: 3,
+    taskIds: Array.from(selectedIds.value),
+    autoRename: mode.value === "audio" ? autoRename.value : false,
+    confidenceThreshold: confidenceThreshold.value,
+    pythonAiEnhancementEnabled:
+      mode.value === "audio" ? pythonAiEnhancementEnabled.value : false,
+    pythonAiModelId: pythonAiModelId.value,
+  };
+}
+
 async function pickDir() {
   try {
     const sel = await open({
@@ -251,13 +305,7 @@ async function doDownload() {
   message.value = "开始下载…";
   try {
     await invoke<string[]>("bili_start_download", {
-      input: {
-        outputDir: outputDir.value || null,
-        concurrency: 3,
-        taskIds: Array.from(selectedIds.value),
-        autoRename: mode.value === "audio" ? autoRename.value : false,
-        confidenceThreshold: confidenceThreshold.value,
-      },
+      input: downloadInput(),
     });
   } catch (e) {
     message.value = String(e);
@@ -273,13 +321,7 @@ async function doResume() {
   message.value = "继续下载…";
   try {
     await invoke<string[]>("bili_start_download", {
-      input: {
-        outputDir: outputDir.value || null,
-        concurrency: 3,
-        taskIds: Array.from(selectedIds.value),
-        autoRename: mode.value === "audio" ? autoRename.value : false,
-        confidenceThreshold: confidenceThreshold.value,
-      },
+      input: downloadInput(),
     });
   } catch (e) {
     message.value = String(e);
@@ -415,9 +457,16 @@ onMounted(async () => {
           t.recognition_error = p.error;
           t.output_path = p.output_path;
         }
+        if (p.phase === "enhance") {
+          t.quality_status = p.quality_status || (p.status as QualityStatus);
+          t.quality_model_id = p.quality_model_id;
+          t.quality_output_path = p.quality_output_path;
+          t.quality_error = p.quality_error;
+        }
       }
       if (p.phase === "recognize") message.value = `识别中 · ${p.title}`;
       if (p.phase === "rename") message.value = `正在生成 MP3 · ${p.title}`;
+      if (p.phase === "enhance") message.value = `${qualityText(p.quality_status)} · ${p.title}`;
       // 仅「停止 / 失败」清除进度展示；「暂停 / 完成」保留
       // （暂停需展示断点进度，完成由 download-finished 统一清理）。
       if (p.status === "Cancelled" || (p.phase === "download" && p.status === "Failed")) {
@@ -425,13 +474,21 @@ onMounted(async () => {
       }
     }
   });
-  off2 = await listen<{ ok: boolean; failed: number; renamed: number; recognize_failed: number; fallback: number }>(
+  off2 = await listen<{
+    ok: boolean;
+    failed: number;
+    renamed: number;
+    recognize_failed: number;
+    fallback: number;
+    enhanced: number;
+    enhance_failed: number;
+  }>(
     "download-finished",
     (e) => {
       downloading.value = false;
       paused.value = false;
       message.value = e.payload.ok
-        ? `下载完成，${e.payload.renamed} 个已重命名${e.payload.fallback ? `，${e.payload.fallback} 个使用原始标题` : ""}`
+        ? `下载完成，${e.payload.renamed} 个已重命名${e.payload.fallback ? `，${e.payload.fallback} 个使用原始标题` : ""}${e.payload.enhanced ? `，${e.payload.enhanced} 个已完成 AI 增强` : ""}${e.payload.enhance_failed ? `，${e.payload.enhance_failed} 个 AI 增强失败` : ""}`
         : `下载结束，${e.payload.failed} 个下载失败`;
       invoke<Task[]>("bili_list_tasks")
         .then((t) => (tasks.value = t))
@@ -512,13 +569,23 @@ onUnmounted(() => {
         </a-row>
         <a-row v-if="mode === 'audio'" :gutter="12">
           <a-col :span="8">
-            <a-form-item label="自动识别并重命名">
+            <a-form-item label="原始音频识别并重命名">
               <a-switch v-model:checked="autoRename" />
             </a-form-item>
           </a-col>
           <a-col :span="8" v-if="autoRename">
             <a-form-item label="最低识别置信度">
               <a-input-number v-model:value="confidenceThreshold" :min="0" :max="100" :precision="1" addon-after="%" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="8">
+            <a-form-item label="Python AI 音频增强">
+              <a-switch v-model:checked="pythonAiEnhancementEnabled" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="8" v-if="pythonAiEnhancementEnabled">
+            <a-form-item label="AI 模型">
+              <a-select v-model:value="pythonAiModelId" :options="[{ label: 'AudioSR 通用音乐恢复', value: 'audiosr-basic' }]" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -685,6 +752,10 @@ onUnmounted(() => {
                     </template>
                     <span v-if="item.error" class="err"> · {{ item.error }}</span>
                     <span v-if="item.recognition_error" class="err"> · {{ item.recognition_error }}</span>
+                    <a-tag v-if="item.mode === 'AudioOnly' || item.mode === 'audio'" :color="qualityColor(item.quality_status)">
+                      {{ qualityText(item.quality_status) }}
+                    </a-tag>
+                    <span v-if="item.quality_error" class="err"> · {{ item.quality_error }}</span>
                   </div>
                   <a-progress
                     :percent="
