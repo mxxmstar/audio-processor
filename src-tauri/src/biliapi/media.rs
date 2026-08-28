@@ -11,6 +11,7 @@
 //! 设计目标：让 `task` 模块只关心"下载什么、下到哪"，合并细节全部收敛到这里。
 
 use crate::biliapi::error::BiliApiError;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -34,13 +35,13 @@ pub fn ffmpeg_dir() -> Option<PathBuf> {
 
 /// 从 `start` 目录开始，逐级向上回溯，把每一级下的 `bin/ffmpeg.exe` 与 `bin/ffmpeg`
 /// 加入候选（直到文件系统根）。这样无论 exe 嵌套多深，都能命中项目根 `bin/ffmpeg.exe`。
-fn walk_up_bin(mut dir: PathBuf, v: &mut Vec<PathBuf>) {
+fn walk_up_bin(mut dir: PathBuf, binary: &str, v: &mut Vec<PathBuf>) {
     loop {
-        v.push(dir.join("bin").join("ffmpeg.exe"));
-        v.push(dir.join("bin").join("ffmpeg"));
+        v.push(dir.join("bin").join(format!("{binary}.exe")));
+        v.push(dir.join("bin").join(binary));
         // 也兼容直接放在该目录（打包后 resource_dir 下的 ffmpeg.exe）
-        v.push(dir.join("ffmpeg.exe"));
-        v.push(dir.join("ffmpeg"));
+        v.push(dir.join(format!("{binary}.exe")));
+        v.push(dir.join(binary));
         match dir.parent() {
             Some(p) => dir = p.to_path_buf(),
             None => break,
@@ -54,33 +55,41 @@ fn walk_up_bin(mut dir: PathBuf, v: &mut Vec<PathBuf>) {
 /// 3. 从可执行文件所在目录逐级向上回溯 `bin/ffmpeg.exe`（覆盖 dev / 打包各种结构）
 /// 4. 当前工作目录逐级向上回溯 `bin/ffmpeg.exe`
 /// 5. 编译期 `CARGO_MANIFEST_DIR/../bin`（仅编译期有效，作为兜底）
-fn ffmpeg_candidates() -> Vec<PathBuf> {
-    let mut v = vec![PathBuf::from("ffmpeg"), PathBuf::from("ffmpeg.exe")];
+fn binary_candidates(binary: &str) -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from(binary), PathBuf::from(format!("{binary}.exe"))];
 
     // 注入的搜索目录（Tauri setup 注入的 resource_dir/bin 或项目 bin）
     if let Some(Some(d)) = FFMPEG_DIR.lock().unwrap().clone() {
-        walk_up_bin(d, &mut v);
+        walk_up_bin(d, binary, &mut v);
     }
 
     // 从可执行文件所在目录逐级向上回溯（dev: target/debug -> ../../.. -> 项目根 bin）
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            walk_up_bin(parent.to_path_buf(), &mut v);
+            walk_up_bin(parent.to_path_buf(), binary, &mut v);
         }
     }
 
     // 从当前工作目录逐级向上回溯
     if let Ok(cwd) = std::env::current_dir() {
-        walk_up_bin(cwd, &mut v);
+        walk_up_bin(cwd, binary, &mut v);
     }
 
     // 编译期常量（仅 `cargo test` 或编译期调用有效）
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
         let base = PathBuf::from(manifest);
-        v.push(base.join("..").join("bin").join("ffmpeg.exe"));
-        v.push(base.join("..").join("bin").join("ffmpeg"));
+        v.push(base.join("..").join("bin").join(format!("{binary}.exe")));
+        v.push(base.join("..").join("bin").join(binary));
     }
     v
+}
+
+fn ffmpeg_candidates() -> Vec<PathBuf> {
+    binary_candidates("ffmpeg")
+}
+
+fn ffprobe_candidates() -> Vec<PathBuf> {
+    binary_candidates("ffprobe")
 }
 
 /// 去掉 Windows 的 `\\?\` 长路径前缀。
@@ -126,6 +135,111 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
         None => println!("[media] find_ffmpeg -> 未找到可用 ffmpeg"),
     }
     found
+}
+
+/// 返回首个可用的 ffprobe 路径；候选顺序与 ffmpeg 保持一致。
+pub fn find_ffprobe() -> Option<PathBuf> {
+    let found = ffprobe_candidates().into_iter().find(|p| candidate_works(p));
+    match &found {
+        Some(p) => println!("[media] find_ffprobe -> 命中: {}", p.display()),
+        None => println!("[media] find_ffprobe -> 未找到可用 ffprobe"),
+    }
+    found
+}
+
+/// 机器可读的音频流参数，用于验证 AI 输出而非判断主观音质。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioProbe {
+    pub codec_name: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeResponse {
+    streams: Vec<FfprobeStream>,
+    format: FfprobeFormat,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeStream {
+    codec_name: Option<String>,
+    sample_rate: Option<String>,
+    channels: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeFormat {
+    duration: Option<String>,
+}
+
+fn parse_audio_probe(json: &str) -> Result<AudioProbe, BiliApiError> {
+    let response: FfprobeResponse = serde_json::from_str(json)
+        .map_err(|error| BiliApiError::Other(format!("ffprobe JSON 无法解析: {error}")))?;
+    let stream = response
+        .streams
+        .into_iter()
+        .next()
+        .ok_or_else(|| BiliApiError::Other("ffprobe 未发现音频流".into()))?;
+    let codec_name = stream
+        .codec_name
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| BiliApiError::Other("ffprobe 未返回音频编码器".into()))?;
+    let sample_rate = stream
+        .sample_rate
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| BiliApiError::Other("ffprobe 未返回有效采样率".into()))?;
+    let channels = stream
+        .channels
+        .filter(|value| *value > 0)
+        .ok_or_else(|| BiliApiError::Other("ffprobe 未返回有效声道数".into()))?;
+    let duration_seconds = response
+        .format
+        .duration
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| BiliApiError::Other("ffprobe 未返回有效时长".into()))?;
+    Ok(AudioProbe {
+        codec_name,
+        sample_rate,
+        channels,
+        duration_seconds,
+    })
+}
+
+/// 使用 ffprobe JSON 探测第一条音频流的实际参数。
+pub fn probe_audio(path: &Path) -> Result<AudioProbe, BiliApiError> {
+    let ffprobe = find_ffprobe().ok_or_else(|| {
+        BiliApiError::Other("未找到可用的 ffprobe，无法校验 AI 输出".into())
+    })?;
+    let ffprobe = strip_verbatim(&ffprobe);
+    let output = std::process::Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels:format=duration",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|error| BiliApiError::Other(format!("调用 ffprobe 失败: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BiliApiError::Other(format!(
+            "ffprobe 探测失败（退出码 {:?}）：{}",
+            output.status.code(),
+            stderr.lines().last().unwrap_or("<无 stderr>")
+        )));
+    }
+    parse_audio_probe(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// 合并选项
@@ -258,6 +372,30 @@ mod tests {
     fn test_candidates_non_empty() {
         // 至少包含 PATH 中的 ffmpeg / ffmpeg.exe
         assert!(!ffmpeg_candidates().is_empty());
+    }
+
+    #[test]
+    fn test_parse_audio_probe_uses_structured_ffprobe_json() {
+        let probe = parse_audio_probe(
+            r#"{
+                "streams": [{"codec_name": "flac", "sample_rate": "48000", "channels": 2}],
+                "format": {"duration": "10.240000"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(probe.codec_name, "flac");
+        assert_eq!(probe.sample_rate, 48_000);
+        assert_eq!(probe.channels, 2);
+        assert_eq!(probe.duration_seconds, 10.24);
+    }
+
+    #[test]
+    fn test_parse_audio_probe_rejects_missing_stream_parameters() {
+        let error = parse_audio_probe(
+            r#"{"streams": [{"codec_name": "flac", "channels": 2}], "format": {"duration": "1"}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("采样率"));
     }
 
     #[test]
