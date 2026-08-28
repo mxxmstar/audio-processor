@@ -104,6 +104,28 @@ fn validate_python_ai_config(config: &PythonAiEnhancementConfig) -> Result<(), S
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioPostprocessStage {
+    Recognize,
+    Enhance,
+    Encode,
+}
+
+fn audio_postprocess_plan(
+    recognition_enabled: bool,
+    enhancement_enabled: bool,
+) -> Vec<AudioPostprocessStage> {
+    let mut stages = Vec::with_capacity(3);
+    if recognition_enabled {
+        stages.push(AudioPostprocessStage::Recognize);
+    }
+    if enhancement_enabled {
+        stages.push(AudioPostprocessStage::Enhance);
+    }
+    stages.push(AudioPostprocessStage::Encode);
+    stages
+}
+
 /// 生成的登录二维码
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginQr {
@@ -689,6 +711,7 @@ async fn postprocess_audio_task(
     };
     task.source_title = source_title.clone();
     let staged = task.staged_file();
+    let postprocess_plan = audio_postprocess_plan(config.enabled, quality_config.enabled);
     if !staged.exists() {
         task.recognition_status = RecognitionStatus::Failed;
         task.recognition_error = Some(format!("下载完成文件不存在: {}", staged.display()));
@@ -703,7 +726,7 @@ async fn postprocess_audio_task(
     }
 
     let mut stem = audio_rename::fallback_stem(&source_title);
-    if config.enabled {
+    if postprocess_plan.contains(&AudioPostprocessStage::Recognize) {
         task.recognition_status = RecognitionStatus::Recognizing;
         task.recognition_error = None;
         emit_audio_postprocess(app, task, "recognize", 0.0);
@@ -749,7 +772,7 @@ async fn postprocess_audio_task(
     emit_audio_postprocess(app, task, "recognize", 1.0);
 
     let mut source_for_encode = staged.clone();
-    if quality_config.enabled {
+    if postprocess_plan.contains(&AudioPostprocessStage::Enhance) {
         task.quality_status = QualityStatus::CheckingRuntime;
         task.quality_model_id = Some(quality_config.model_id.clone());
         task.quality_error = None;
@@ -1403,6 +1426,42 @@ mod tests {
         };
         assert!(!config.enabled);
         assert!(validate_python_ai_config(&config).is_ok());
+    }
+
+    #[test]
+    fn audio_postprocess_plan_disables_both_optional_stages() {
+        assert_eq!(
+            audio_postprocess_plan(false, false),
+            vec![AudioPostprocessStage::Encode]
+        );
+    }
+
+    #[test]
+    fn audio_postprocess_plan_runs_only_recognition_when_ai_is_disabled() {
+        assert_eq!(
+            audio_postprocess_plan(true, false),
+            vec![AudioPostprocessStage::Recognize, AudioPostprocessStage::Encode]
+        );
+    }
+
+    #[test]
+    fn audio_postprocess_plan_runs_only_ai_when_recognition_is_disabled() {
+        assert_eq!(
+            audio_postprocess_plan(false, true),
+            vec![AudioPostprocessStage::Enhance, AudioPostprocessStage::Encode]
+        );
+    }
+
+    #[test]
+    fn audio_postprocess_plan_runs_recognition_before_ai() {
+        assert_eq!(
+            audio_postprocess_plan(true, true),
+            vec![
+                AudioPostprocessStage::Recognize,
+                AudioPostprocessStage::Enhance,
+                AudioPostprocessStage::Encode
+            ]
+        );
     }
 
     #[test]
