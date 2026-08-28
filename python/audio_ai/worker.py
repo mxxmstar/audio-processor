@@ -22,6 +22,11 @@ import types
 from pathlib import Path
 from typing import Any
 
+# AudioSR indirectly imports Transformers. Keep the inference Worker offline;
+# model installation is handled by the separate, explicit model_manager.py.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import numpy as np
 import torch
 
@@ -417,9 +422,11 @@ def load_audiosr(
     """Load AudioSR without allowing its helper to fetch a checkpoint."""
     if os.environ.get("AUDIO_AI_DEBUG") == "1":
         print(f"audiosr import: {checkpoint_path}", file=sys.stderr, flush=True)
+    offline_patches = patch_audiosr_offline_dependencies()
     try:
         from audiosr import pipeline as audiosr_pipeline
     except Exception as error:  # AudioSR import can fail on incompatible native deps.
+        restore_audiosr_offline_dependencies(offline_patches)
         raise WorkerFailure(
             "MODEL_RUNTIME_NOT_FOUND", f"cannot import audiosr: {error}"
         ) from error
@@ -453,6 +460,76 @@ def load_audiosr(
         raise WorkerFailure("MODEL_LOAD_FAILED", str(error)) from error
     finally:
         audiosr_pipeline.download_checkpoint = original_download_checkpoint
+        restore_audiosr_offline_dependencies(offline_patches)
+
+
+class OfflineRobertaTokenizer:
+    """Enough of the tokenizer API for AudioSR's unconditional empty prompt."""
+
+    def __call__(
+        self,
+        texts: Any,
+        padding: str = "max_length",
+        truncation: bool = True,
+        max_length: int = 512,
+        return_tensors: str = "pt",
+    ) -> dict[str, torch.Tensor]:
+        del padding, truncation, return_tensors
+        if isinstance(texts, str):
+            texts = [texts]
+        count = len(texts)
+        input_ids = torch.full((count, max_length), 1, dtype=torch.long)
+        attention_mask = torch.zeros((count, max_length), dtype=torch.long)
+        token_type_ids = torch.zeros((count, max_length), dtype=torch.long)
+        if max_length > 0:
+            input_ids[:, 0] = 0
+            attention_mask[:, 0] = 1
+        if max_length > 1:
+            input_ids[:, 1] = 2
+            attention_mask[:, 1] = 1
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        }
+
+
+def patch_audiosr_offline_dependencies() -> list[tuple[type[Any], str, bool, Any]]:
+    """Patch AudioSR's unused text side so model loading never contacts Hub.
+
+    AudioSR's unconditional audio conditioning does not use text, but version
+    0.0.7 still constructs a Roberta tokenizer/config through Transformers.
+    Those calls trigger network retries when the optional Hub files are absent.
+    The model checkpoint contains the CLAP/audio weights; an empty-token batch
+    only needs the standard Roberta token IDs and config shape during startup.
+    """
+    try:
+        from transformers import RobertaConfig, RobertaTokenizer
+    except Exception as error:
+        raise WorkerFailure(
+            "MODEL_RUNTIME_NOT_FOUND", f"cannot prepare AudioSR offline runtime: {error}"
+        ) from error
+
+    patches: list[tuple[type[Any], str, bool, Any]] = []
+    for target, factory in (
+        (RobertaTokenizer, lambda cls, *args, **kwargs: OfflineRobertaTokenizer()),
+        (RobertaConfig, lambda cls, *args, **kwargs: cls()),
+    ):
+        had_own_factory = "from_pretrained" in target.__dict__
+        original_factory = target.__dict__.get("from_pretrained")
+        patches.append((target, "from_pretrained", had_own_factory, original_factory))
+        target.from_pretrained = classmethod(factory)
+    return patches
+
+
+def restore_audiosr_offline_dependencies(
+    patches: list[tuple[type[Any], str, bool, Any]]
+) -> None:
+    for target, name, had_own_factory, original_factory in patches:
+        if had_own_factory:
+            setattr(target, name, original_factory)
+        else:
+            delattr(target, name)
 
 
 def cached_audiosr(

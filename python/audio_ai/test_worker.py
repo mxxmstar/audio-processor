@@ -114,6 +114,27 @@ class AudioSrAdapterTests(unittest.TestCase):
         self.assertEqual(calls, [torch.device("cpu"), "basic", str(checkpoint)])
         self.assertIs(pipeline.download_checkpoint, remote_download)
 
+    def test_audiosr_offline_patch_avoids_hub_and_restores_transformers(self) -> None:
+        from transformers import RobertaConfig, RobertaTokenizer
+
+        original_config_factory = RobertaConfig.__dict__.get("from_pretrained")
+        original_tokenizer_factory = RobertaTokenizer.__dict__.get("from_pretrained")
+        patches = worker.patch_audiosr_offline_dependencies()
+        try:
+            config = RobertaConfig.from_pretrained("missing-roberta")
+            tokenizer = RobertaTokenizer.from_pretrained("missing-roberta")
+            self.assertEqual(config.vocab_size, 50265)
+            encoded = tokenizer([""], max_length=4)
+            self.assertEqual(tuple(encoded["input_ids"].shape), (1, 4))
+            self.assertEqual(encoded["input_ids"].tolist(), [[0, 2, 1, 1]])
+        finally:
+            worker.restore_audiosr_offline_dependencies(patches)
+
+        self.assertIs(RobertaConfig.__dict__.get("from_pretrained"), original_config_factory)
+        self.assertIs(
+            RobertaTokenizer.__dict__.get("from_pretrained"), original_tokenizer_factory
+        )
+
     def test_infer_audiosr_trims_internal_padding(self) -> None:
         chunk = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
         written: list[tuple[np.ndarray, str, int, int]] = []
