@@ -6,6 +6,9 @@
 //! - 启动并发下载，进度经 Tauri 事件 `download-progress` 推送到前端
 
 use crate::audio_rename::{self, AutoRenameConfig};
+use crate::audio_quality::ai_worker::{
+    self, AiProcessRequest, WorkerError, WorkerEvent, WorkerEventCallback, WorkerSpec,
+};
 use crate::bili_state::BiliState;
 use crate::biliapi::client::BiliClient;
 use crate::biliapi::login;
@@ -142,6 +145,14 @@ pub struct ProgressEvent {
     pub output_path: Option<String>,
     #[serde(default)]
     pub confidence: Option<f64>,
+    #[serde(default)]
+    pub quality_status: Option<String>,
+    #[serde(default)]
+    pub quality_model_id: Option<String>,
+    #[serde(default)]
+    pub quality_output_path: Option<String>,
+    #[serde(default)]
+    pub quality_error: Option<String>,
 }
 
 /// 解析完成事件（带最终任务列表）
@@ -500,6 +511,10 @@ fn emit_resolve_progress(app: &AppHandle, done: usize, total: usize, title: &str
             source_title: title.to_string(),
             output_path: None,
             confidence: None,
+            quality_status: None,
+            quality_model_id: None,
+            quality_output_path: None,
+            quality_error: None,
         },
     );
 }
@@ -525,8 +540,128 @@ fn emit_audio_postprocess(app: &AppHandle, task: &DownloadTask, phase: &str, per
             },
             output_path: task.output_path.clone(),
             confidence: task.recognition_result.as_ref().map(|r| r.confidence),
+            quality_status: Some(format!("{:?}", task.quality_status)),
+            quality_model_id: task.quality_model_id.clone(),
+            quality_output_path: task.quality_output_path.clone(),
+            quality_error: task.quality_error.clone(),
         },
     );
+}
+
+fn emit_quality_postprocess(
+    app: &AppHandle,
+    task: &DownloadTask,
+    percent: f64,
+    message: Option<String>,
+) {
+    let _ = app.emit(
+        "download-progress",
+        ProgressEvent {
+            phase: "enhance".into(),
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            status: format!("{:?}", task.quality_status),
+            percent: percent.clamp(0.0, 1.0),
+            downloaded: 0,
+            total: 0,
+            speed: 0,
+            error: task.error.clone(),
+            source_title: if task.source_title.is_empty() {
+                task.title.clone()
+            } else {
+                task.source_title.clone()
+            },
+            output_path: task.output_path.clone(),
+            confidence: task.recognition_result.as_ref().map(|r| r.confidence),
+            quality_status: Some(format!("{:?}", task.quality_status)),
+            quality_model_id: task.quality_model_id.clone(),
+            quality_output_path: task.quality_output_path.clone(),
+            quality_error: task.quality_error.clone().or(message),
+        },
+    );
+}
+
+fn enhancement_worker_spec() -> Option<WorkerSpec> {
+    if let Some(path) = std::env::var_os("AUDIO_AI_WORKER") {
+        return Some(WorkerSpec::new(path));
+    }
+    if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
+        return WorkerSpec::fake("success");
+    }
+    WorkerSpec::production()
+}
+
+fn quality_output_path(task: &DownloadTask) -> std::path::PathBuf {
+    let mut output = audio_rename::staging_path(
+        Path::new(&task.output_dir),
+        &format!("{}-ai", task.id),
+        "flac",
+    );
+    output.set_extension("flac");
+    output
+}
+
+async fn enhance_audio_task(
+    app: &AppHandle,
+    task: &mut DownloadTask,
+    config: &PythonAiEnhancementConfig,
+    staged: &Path,
+) -> Result<std::path::PathBuf, WorkerError> {
+    let output = quality_output_path(task);
+    let Some(spec) = enhancement_worker_spec() else {
+        return Err(WorkerError::Spawn(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "找不到 Python AI Worker 或 Python 运行时",
+        )));
+    };
+    let request = AiProcessRequest {
+        request_id: format!("{}-ai", task.id),
+        input_path: staged.to_string_lossy().into_owned(),
+        output_path: output.to_string_lossy().into_owned(),
+        model_id: config.model_id.clone(),
+        device: config.device.clone(),
+        chunk_seconds: config.chunk_seconds,
+        overlap_seconds: config.overlap_seconds,
+        output_sample_rate: Some(48_000),
+    };
+    let task_for_event = task.clone();
+    let app_for_event = app.clone();
+    let callback: WorkerEventCallback = Arc::new(move |event| {
+        let status = match event {
+            WorkerEvent::Ready { .. } => "CheckingRuntime",
+            WorkerEvent::Progress { phase, .. } if phase == "load_model" => "LoadingModel",
+            WorkerEvent::Progress { .. } => "Enhancing",
+            WorkerEvent::Completed { .. } => "Completed",
+            WorkerEvent::Error { .. } => "Failed",
+        };
+        let percent = match event {
+            WorkerEvent::Progress { percent, .. } => percent / 100.0,
+            WorkerEvent::Completed { .. } => 1.0,
+            _ => 0.0,
+        };
+        let mut snapshot = task_for_event.clone();
+        snapshot.quality_status = match status {
+            "CheckingRuntime" => QualityStatus::CheckingRuntime,
+            "LoadingModel" => QualityStatus::LoadingModel,
+            "Enhancing" => QualityStatus::Enhancing,
+            "Completed" => QualityStatus::Completed,
+            _ => QualityStatus::Failed,
+        };
+        emit_quality_postprocess(&app_for_event, &snapshot, percent, None);
+    });
+
+    let run = ai_worker::run_worker_with_callback(&spec, &request, None, Some(callback)).await?;
+    if run.result.output_path != output.to_string_lossy()
+        || !output.is_file()
+        || std::fs::metadata(&output)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+    {
+        return Err(WorkerError::Protocol(
+            "AI Worker 返回的输出文件不存在或为空".into(),
+        ));
+    }
+    Ok(output)
 }
 
 /// 下载完成后的 AudioOnly 后处理：识别、转码为 MP3、生成最终文件名。
@@ -538,6 +673,7 @@ async fn postprocess_audio_task(
     task: &mut DownloadTask,
     fpcalc_path: Option<&Path>,
     config: &AutoRenameConfig,
+    quality_config: &PythonAiEnhancementConfig,
 ) {
     if task.mode != DownloadMode::AudioOnly
         || task.status != crate::biliapi::task::DownloadStatus::Completed
@@ -606,13 +742,39 @@ async fn postprocess_audio_task(
     }
     emit_audio_postprocess(app, task, "recognize", 1.0);
 
-    // 识别读取的是 m4a 临时文件，最终按用户要求统一转码为 mp3。
+    let mut source_for_encode = staged.clone();
+    if quality_config.enabled {
+        task.quality_status = QualityStatus::CheckingRuntime;
+        task.quality_model_id = Some(quality_config.model_id.clone());
+        task.quality_error = None;
+        emit_quality_postprocess(app, task, 0.0, Some("正在准备 Python AI 增强".into()));
+        match enhance_audio_task(app, task, quality_config, &staged).await {
+            Ok(enhanced) => {
+                task.quality_status = QualityStatus::Completed;
+                task.quality_output_path = Some(enhanced.to_string_lossy().into_owned());
+                source_for_encode = enhanced;
+                emit_quality_postprocess(app, task, 1.0, Some("AI 增强完成".into()));
+            }
+            Err(error) => {
+                task.quality_status = QualityStatus::Failed;
+                task.quality_error = Some(error.to_string());
+                let failed_output = quality_output_path(task);
+                let _ = std::fs::remove_file(failed_output);
+                emit_quality_postprocess(app, task, 1.0, Some("AI 增强失败，已使用原始音频".into()));
+            }
+        }
+    }
+
+    // 识别和 AI 都完成后，最终按用户要求统一转码为 mp3。
     let mp3_part = dir.join(format!(
         ".audio-processor-{}.mp3.part",
         audio_rename::sanitize_component(&task.id).replace(' ', "_")
     ));
     let _ = std::fs::remove_file(&mp3_part);
-    if let Err(e) = media::transcode_audio(&staged.to_string_lossy(), &mp3_part.to_string_lossy()) {
+    if let Err(e) = media::transcode_audio(
+        &source_for_encode.to_string_lossy(),
+        &mp3_part.to_string_lossy(),
+    ) {
         task.recognition_status = RecognitionStatus::RenameFailed;
         task.recognition_error = Some(e.to_string());
         // ffmpeg 不可用时仍保留可播放的原始 m4a，并去掉 .part 后缀。
@@ -633,6 +795,10 @@ async fn postprocess_audio_task(
     match audio_rename::move_to_unique(&mp3_part, &dir, &stem, &config.extension) {
         Ok(path) => {
             let _ = std::fs::remove_file(&staged);
+            if source_for_encode != staged {
+                let _ = std::fs::remove_file(&source_for_encode);
+                task.quality_output_path = None;
+            }
             task.title = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -648,6 +814,10 @@ async fn postprocess_audio_task(
             task.recognition_status = RecognitionStatus::RenameFailed;
             task.recognition_error = Some(e.clone());
             let _ = std::fs::remove_file(&mp3_part);
+            if source_for_encode != staged {
+                let _ = std::fs::remove_file(&source_for_encode);
+                task.quality_output_path = None;
+            }
             if let Ok(path) = audio_rename::move_to_unique(&staged, &dir, &source_title, "m4a") {
                 task.output_path = Some(path.to_string_lossy().into_owned());
                 task.staged_path = None;
@@ -915,6 +1085,10 @@ pub async fn bili_start_download(
                 },
                 output_path: task.output_path.clone(),
                 confidence: task.recognition_result.as_ref().map(|r| r.confidence),
+                quality_status: Some(format!("{:?}", task.quality_status)),
+                quality_model_id: task.quality_model_id.clone(),
+                quality_output_path: task.quality_output_path.clone(),
+                quality_error: task.quality_error.clone(),
             };
             let _ = app_for_cb.emit("download-progress", payload);
         },
@@ -950,7 +1124,14 @@ pub async fn bili_start_download(
                 task.quality_output_path = None;
                 task.quality_error = None;
             }
-            postprocess_audio_task(&app2, task, fpcalc_path.as_deref(), &rename_config).await;
+            postprocess_audio_task(
+                &app2,
+                task,
+                fpcalc_path.as_deref(),
+                &rename_config,
+                &quality_config,
+            )
+            .await;
             app2.state::<BiliState>()
                 .apply_results(std::slice::from_ref(task));
         }
@@ -992,6 +1173,14 @@ pub async fn bili_start_download(
                 }
             })
             .count();
+        let enhanced = tasks_ref
+            .iter()
+            .filter(|t| t.quality_status == QualityStatus::Completed)
+            .count();
+        let enhance_failed = tasks_ref
+            .iter()
+            .filter(|t| t.quality_status == QualityStatus::Failed)
+            .count();
 
         // 下载完成后写入通用历史库（每条任务一条，含最终状态/错误）
         let hist_dir = crate::commands::history_dir(&app2);
@@ -1025,7 +1214,9 @@ pub async fn bili_start_download(
                 "failed": failed.len(),
                 "renamed": renamed,
                 "recognize_failed": recognize_failed,
-                "fallback": fallback
+                "fallback": fallback,
+                "enhanced": enhanced,
+                "enhance_failed": enhance_failed
             }),
         );
     });
