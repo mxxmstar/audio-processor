@@ -10,7 +10,9 @@ use crate::bili_state::BiliState;
 use crate::biliapi::client::BiliClient;
 use crate::biliapi::login;
 use crate::biliapi::media;
-use crate::biliapi::task::{DownloadMode, DownloadTask, RecognitionStatus, TaskGroup};
+use crate::biliapi::task::{
+    DownloadMode, DownloadTask, QualityStatus, RecognitionStatus, TaskGroup,
+};
 use crate::biliapi::types::{MediaFormat, QrInfo};
 use crate::biliapi::video;
 use crate::recognizer::run_identify;
@@ -54,6 +56,49 @@ pub struct StartDownloadInput {
     /// 自动识别的最低置信度，缺省 70%。
     #[serde(default)]
     pub confidence_threshold: Option<f64>,
+    /// 是否在仅音频下载完成后启动 Python AI 增强；默认关闭。
+    #[serde(default)]
+    pub python_ai_enhancement_enabled: Option<bool>,
+    /// AI 模型 ID；默认 audiosr-basic。
+    #[serde(default)]
+    pub python_ai_model_id: Option<String>,
+    /// AI 推理设备，例如 auto / cpu / cuda。
+    #[serde(default)]
+    pub python_ai_device: Option<String>,
+    /// AI 单次处理的音频秒数。
+    #[serde(default)]
+    pub python_ai_chunk_seconds: Option<f64>,
+    /// AI 分块重叠秒数。
+    #[serde(default)]
+    pub python_ai_overlap_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PythonAiEnhancementConfig {
+    enabled: bool,
+    model_id: String,
+    device: String,
+    chunk_seconds: f64,
+    overlap_seconds: f64,
+}
+
+fn validate_python_ai_config(config: &PythonAiEnhancementConfig) -> Result<(), String> {
+    if config.model_id.trim().is_empty() {
+        return Err("pythonAiModelId 不能为空".into());
+    }
+    if !matches!(config.device.as_str(), "auto" | "cpu" | "cuda") {
+        return Err("pythonAiDevice 必须是 auto、cpu 或 cuda".into());
+    }
+    if !(config.chunk_seconds.is_finite() && config.chunk_seconds > 0.0) {
+        return Err("pythonAiChunkSeconds 必须是正数".into());
+    }
+    if !(config.overlap_seconds.is_finite()
+        && config.overlap_seconds >= 0.0
+        && config.overlap_seconds < config.chunk_seconds)
+    {
+        return Err("pythonAiOverlapSeconds 必须大于等于 0 且小于分块长度".into());
+    }
+    Ok(())
 }
 
 /// 生成的登录二维码
@@ -817,6 +862,26 @@ pub async fn bili_start_download(
         confidence_threshold: input.confidence_threshold.unwrap_or(70.0).clamp(0.0, 100.0),
         ..AutoRenameConfig::default()
     };
+    let quality_enabled = input.python_ai_enhancement_enabled.unwrap_or(false);
+    let quality_model_id = input
+        .python_ai_model_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or("audiosr-basic")
+        .to_string();
+    let (default_chunk_seconds, default_overlap_seconds) = if quality_model_id == "audiosr-basic" {
+        (10.24, 1.28)
+    } else {
+        (20.0, 2.0)
+    };
+    let quality_config = PythonAiEnhancementConfig {
+        enabled: quality_enabled,
+        model_id: quality_model_id,
+        device: input.python_ai_device.unwrap_or_else(|| "auto".into()),
+        chunk_seconds: input.python_ai_chunk_seconds.unwrap_or(default_chunk_seconds),
+        overlap_seconds: input.python_ai_overlap_seconds.unwrap_or(default_overlap_seconds),
+    };
+    validate_python_ai_config(&quality_config)?;
     // fpcalc 缺失不阻断下载，后处理会转为 MP3，并保留可读错误状态。
     let fpcalc_path = crate::commands::fpcalc_path(&app).ok();
 
@@ -873,6 +938,18 @@ pub async fn bili_start_download(
         )
         .await;
         for task in tasks_ref.iter_mut() {
+            if task.mode == DownloadMode::AudioOnly {
+                task.quality_status = if quality_config.enabled {
+                    QualityStatus::Pending
+                } else {
+                    QualityStatus::Disabled
+                };
+                task.quality_model_id = quality_config
+                    .enabled
+                    .then(|| quality_config.model_id.clone());
+                task.quality_output_path = None;
+                task.quality_error = None;
+            }
             postprocess_audio_task(&app2, task, fpcalc_path.as_deref(), &rename_config).await;
             app2.state::<BiliState>()
                 .apply_results(std::slice::from_ref(task));
@@ -1117,6 +1194,38 @@ fn recognition_label(s: RecognitionStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_ai_config_defaults_to_disabled_audio_sr_settings() {
+        let config = PythonAiEnhancementConfig {
+            enabled: false,
+            model_id: "audiosr-basic".into(),
+            device: "auto".into(),
+            chunk_seconds: 10.24,
+            overlap_seconds: 1.28,
+        };
+        assert!(!config.enabled);
+        assert!(validate_python_ai_config(&config).is_ok());
+    }
+
+    #[test]
+    fn python_ai_config_rejects_invalid_device_and_overlap() {
+        let invalid_device = PythonAiEnhancementConfig {
+            enabled: true,
+            model_id: "audiosr-basic".into(),
+            device: "metal".into(),
+            chunk_seconds: 10.24,
+            overlap_seconds: 1.28,
+        };
+        assert!(validate_python_ai_config(&invalid_device).is_err());
+
+        let invalid_overlap = PythonAiEnhancementConfig {
+            device: "cpu".into(),
+            overlap_seconds: 10.24,
+            ..invalid_device
+        };
+        assert!(validate_python_ai_config(&invalid_overlap).is_err());
+    }
 
     #[test]
     fn test_identify_collection_query() {

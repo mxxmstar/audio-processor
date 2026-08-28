@@ -62,6 +62,24 @@ impl Default for RecognitionStatus {
     }
 }
 
+/// Python AI 增强状态，与下载传输及音频识别状态分别维护。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QualityStatus {
+    Disabled,
+    Pending,
+    CheckingRuntime,
+    LoadingModel,
+    Enhancing,
+    Completed,
+    Failed,
+}
+
+impl Default for QualityStatus {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
 /// 下载控制句柄：通过 `Arc<AtomicBool>` 信号实现暂停 / 停止。
 ///
 /// - `pause` 置位：当前任务下载完成后进入 `Paused`，保留已下载文件，可续传。
@@ -112,6 +130,18 @@ pub struct DownloadTask {
     /// 识别或重命名错误，不覆盖下载错误。
     #[serde(default)]
     pub recognition_error: Option<String>,
+    /// Python AI 增强状态，不覆盖下载或识别状态。
+    #[serde(default)]
+    pub quality_status: QualityStatus,
+    /// 本次 AI 增强实际使用的模型 ID。
+    #[serde(default)]
+    pub quality_model_id: Option<String>,
+    /// AI 增强生成的无损中间文件路径。
+    #[serde(default)]
+    pub quality_output_path: Option<String>,
+    /// AI 增强失败原因，不覆盖下载或识别错误。
+    #[serde(default)]
+    pub quality_error: Option<String>,
     /// 下载过程中的稳定临时文件路径。
     #[serde(default)]
     pub staged_path: Option<String>,
@@ -173,6 +203,10 @@ impl DownloadTask {
             },
             recognition_result: None,
             recognition_error: None,
+            quality_status: QualityStatus::Disabled,
+            quality_model_id: None,
+            quality_output_path: None,
+            quality_error: None,
             staged_path: None,
             output_path: None,
             group,
@@ -640,6 +674,8 @@ mod tests {
         assert_eq!(task.video_url.as_deref(), Some("v"));
         assert_eq!(task.audio_url.as_deref(), Some("a"));
         assert_eq!(task.status, DownloadStatus::Pending);
+        assert_eq!(task.quality_status, QualityStatus::Disabled);
+        assert!(task.quality_output_path.is_none());
     }
 
     #[test]
