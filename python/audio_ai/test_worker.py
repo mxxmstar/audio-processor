@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -195,6 +196,44 @@ class AudioSrAdapterTests(unittest.TestCase):
                         0,
                         0,
                     )
+
+    def test_infer_audiosr_reads_temporary_wav_without_torchcodec(self) -> None:
+        import torchaudio
+
+        chunk = np.array([[0.1, -0.2, 0.3]], dtype=np.float32)
+        original_load = torchaudio.load
+        loaded: list[tuple[torch.Tensor, int]] = []
+
+        def fake_encode(
+            audio: np.ndarray, output_path: str, sample_rate: int, channels: int
+        ) -> None:
+            pcm = np.clip(audio.T * 32767.0, -32768, 32767).astype("<i2")
+            with wave.open(output_path, "wb") as output:
+                output.setnchannels(channels)
+                output.setsampwidth(2)
+                output.setframerate(sample_rate)
+                output.writeframes(pcm.tobytes())
+
+        def fake_super_resolution(*args: object, **kwargs: object) -> np.ndarray:
+            waveform, sample_rate = torchaudio.load(args[1])
+            loaded.append((waveform, sample_rate))
+            return np.array([[[0.5, 0.4, 0.3]]], dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(worker, "encode_audio", fake_encode):
+                result = worker.infer_audiosr(
+                    "model",
+                    fake_super_resolution,
+                    chunk,
+                    Path(directory),
+                    0,
+                    0,
+                )
+
+        self.assertIs(torchaudio.load, original_load)
+        self.assertEqual(loaded[0][1], 48_000)
+        np.testing.assert_allclose(loaded[0][0].numpy(), chunk, atol=1e-4)
+        np.testing.assert_allclose(result, [[0.5, 0.4, 0.3]])
 
 
 if __name__ == "__main__":

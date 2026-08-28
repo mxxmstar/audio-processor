@@ -583,6 +583,35 @@ def infer_audiosr(
     input_path = temporary_dir / f"chunk-{chunk_index:05d}-channel-{channel_index}.wav"
     encode_audio(chunk, str(input_path), 48_000, 1)
     try:
+        import torchaudio
+    except ImportError as error:
+        raise WorkerFailure(
+            "MODEL_RUNTIME_NOT_FOUND", "AudioSR requires torchaudio"
+        ) from error
+
+    original_torchaudio_load = torchaudio.load
+
+    def load_wav_without_torchcodec(
+        path: str | os.PathLike[str], *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, int]:
+        del args, kwargs
+        try:
+            import soundfile as sf
+
+            samples, sample_rate = sf.read(
+                str(path), always_2d=True, dtype="float32"
+            )
+        except (ImportError, OSError, ValueError) as error:
+            raise RuntimeError(f"AudioSR WAV read failed: {error}") from error
+        if samples.size == 0:
+            raise RuntimeError("AudioSR WAV read returned no samples")
+        return torch.from_numpy(np.ascontiguousarray(samples.T)), int(sample_rate)
+
+    try:
+        # torchaudio 2.11 delegates load() to TorchCodec, which is optional.
+        # AudioSR only reads the temporary WAV produced above, so soundfile is
+        # sufficient and keeps the worker's runtime dependency smaller.
+        torchaudio.load = load_wav_without_torchcodec
         # AudioSR and its dependencies may print progress/logs. stdout belongs
         # exclusively to this worker's JSONL protocol.
         with contextlib.redirect_stdout(sys.stderr):
@@ -599,6 +628,8 @@ def infer_audiosr(
         raise WorkerFailure("INFERENCE_FAILED", str(error)) from error
     except (OSError, ValueError) as error:
         raise WorkerFailure("INFERENCE_FAILED", str(error)) from error
+    finally:
+        torchaudio.load = original_torchaudio_load
 
     if isinstance(predicted, torch.Tensor):
         result = predicted.detach().float().cpu().numpy()
