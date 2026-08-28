@@ -885,6 +885,18 @@ def process_in_thread(request: dict[str, Any], cancel_event: threading.Event) ->
         emit_error(request_id, WorkerFailure("INFERENCE_FAILED", str(error)))
 
 
+def prepare_model_for_request(request: dict[str, Any], model_dir: Path) -> None:
+    """Load native Python backends on the protocol thread before inference."""
+    model_path, _, backend, runtime_path, model_name = find_model(
+        str(request.get("model_id", "")), model_dir
+    )
+    device = choose_device(str(request.get("device", "auto")))
+    if backend == "deepfilternet":
+        cached_deepfilternet(runtime_path, device)
+    elif backend == "audiosr":
+        cached_audiosr(model_path, model_name, device)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", default=None)
@@ -922,19 +934,13 @@ def main() -> int:
             if active_thread and active_thread.is_alive():
                 emit_error(request_id, WorkerFailure("BUSY", "worker is already processing"))
                 continue
-            # DeepFilterNet initializes global device/logging state. Prepare it
-            # on the protocol thread, then let the worker thread reuse the cache.
+            # Native backends initialize global runtime state. Prepare them on
+            # the protocol thread, then let the worker thread reuse the cache.
             try:
                 model_dir = Path(
                     os.environ.get("AUDIO_AI_MODEL_DIR", str(SCRIPT_ROOT / "models"))
                 )
-                _, _, backend, runtime_path, _ = find_model(
-                    str(request.get("model_id", "")), model_dir
-                )
-                if backend == "deepfilternet":
-                    cached_deepfilternet(
-                        runtime_path, choose_device(str(request.get("device", "auto")))
-                    )
+                prepare_model_for_request(request, model_dir)
             except WorkerFailure as failure:
                 emit_error(request_id, failure)
                 continue

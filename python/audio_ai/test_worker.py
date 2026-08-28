@@ -122,6 +122,31 @@ class AudioSrAdapterTests(unittest.TestCase):
         self.assertEqual(calls, [torch.device("cpu"), "basic", str(checkpoint)])
         self.assertIs(pipeline.download_checkpoint, remote_download)
 
+    def test_prepare_model_for_request_preloads_native_backends(self) -> None:
+        model_dir = Path("C:/models")
+        model_path = model_dir / "checkpoint.bin"
+        runtime_path = model_dir / "runtime"
+        device = torch.device("cpu")
+        request = {"model_id": "model-id", "device": "cpu"}
+
+        with patch.object(worker, "choose_device", return_value=device), patch.object(
+            worker,
+            "find_model",
+            return_value=(model_path, "version", "audiosr", runtime_path, "basic"),
+        ), patch.object(worker, "cached_audiosr") as cached_audiosr:
+            worker.prepare_model_for_request(request, model_dir)
+
+        cached_audiosr.assert_called_once_with(model_path, "basic", device)
+
+        with patch.object(worker, "choose_device", return_value=device), patch.object(
+            worker,
+            "find_model",
+            return_value=(model_path, "version", "deepfilternet", runtime_path, ""),
+        ), patch.object(worker, "cached_deepfilternet") as cached_deepfilternet:
+            worker.prepare_model_for_request(request, model_dir)
+
+        cached_deepfilternet.assert_called_once_with(runtime_path, device)
+
     def test_audiosr_offline_patch_avoids_hub_and_restores_transformers(self) -> None:
         from transformers import RobertaConfig, RobertaTokenizer
 
