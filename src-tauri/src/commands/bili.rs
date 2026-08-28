@@ -692,6 +692,12 @@ async fn postprocess_audio_task(
     if !staged.exists() {
         task.recognition_status = RecognitionStatus::Failed;
         task.recognition_error = Some(format!("下载完成文件不存在: {}", staged.display()));
+        if quality_config.enabled {
+            task.quality_status = QualityStatus::Failed;
+            task.quality_model_id = Some(quality_config.model_id.clone());
+            task.quality_error = Some("AI 增强输入文件不存在".into());
+            emit_quality_postprocess(app, task, 1.0, None);
+        }
         emit_audio_postprocess(app, task, "recognize", 0.0);
         return;
     }
@@ -777,6 +783,10 @@ async fn postprocess_audio_task(
     ) {
         task.recognition_status = RecognitionStatus::RenameFailed;
         task.recognition_error = Some(e.to_string());
+        if source_for_encode != staged {
+            let _ = std::fs::remove_file(&source_for_encode);
+            task.quality_output_path = None;
+        }
         // ffmpeg 不可用时仍保留可播放的原始 m4a，并去掉 .part 后缀。
         match audio_rename::move_to_unique(&staged, &dir, &source_title, "m4a") {
             Ok(path) => {
@@ -1416,6 +1426,38 @@ mod tests {
             ..invalid_device
         };
         assert!(validate_python_ai_config(&invalid_overlap).is_err());
+    }
+
+    #[test]
+    fn quality_output_path_is_flac_and_is_hidden_from_final_outputs() {
+        let task = DownloadTask {
+            id: "BV1abc#1".into(),
+            title: "source".into(),
+            source_title: "source".into(),
+            video_url: None,
+            audio_url: Some("audio".into()),
+            mode: DownloadMode::AudioOnly,
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            status: crate::biliapi::task::DownloadStatus::Completed,
+            error: None,
+            recognition_status: RecognitionStatus::Disabled,
+            recognition_result: None,
+            recognition_error: None,
+            quality_status: QualityStatus::Pending,
+            quality_model_id: Some("audiosr-basic".into()),
+            quality_output_path: None,
+            quality_error: None,
+            staged_path: None,
+            output_path: None,
+            group: None,
+            cover: None,
+        };
+        let output = quality_output_path(&task);
+        assert_eq!(output.extension().and_then(|value| value.to_str()), Some("flac"));
+        assert!(output
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.starts_with(".audio-processor-")));
     }
 
     #[test]
