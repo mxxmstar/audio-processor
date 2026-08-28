@@ -416,12 +416,28 @@ def cached_deepfilternet(model_dir: Path, device: torch.device) -> tuple[Any, An
         return cached
 
 
+def ensure_audiosr_plotting_compatibility() -> None:
+    """Provide AudioSR's unused plotting import when matplotlib is absent."""
+    try:
+        import matplotlib  # noqa: F401
+    except ModuleNotFoundError as error:
+        if error.name != "matplotlib":
+            raise
+        matplotlib = types.ModuleType("matplotlib")
+        matplotlib.use = lambda *args, **kwargs: None
+        pyplot = types.ModuleType("matplotlib.pyplot")
+        matplotlib.pyplot = pyplot
+        sys.modules["matplotlib"] = matplotlib
+        sys.modules["matplotlib.pyplot"] = pyplot
+
+
 def load_audiosr(
     checkpoint_path: Path, model_name: str, device: torch.device
 ) -> tuple[Any, Any]:
     """Load AudioSR without allowing its helper to fetch a checkpoint."""
     if os.environ.get("AUDIO_AI_DEBUG") == "1":
         print(f"audiosr import: {checkpoint_path}", file=sys.stderr, flush=True)
+    ensure_audiosr_plotting_compatibility()
     offline_patches = patch_audiosr_offline_dependencies()
     try:
         from audiosr import pipeline as audiosr_pipeline
@@ -511,9 +527,18 @@ def patch_audiosr_offline_dependencies() -> list[tuple[type[Any], str, bool, Any
         ) from error
 
     patches: list[tuple[type[Any], str, bool, Any]] = []
+    def offline_roberta_config(cls: type[Any], *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        config = cls()
+        # AudioSR's checkpoint was trained with the original 514-token
+        # Roberta embedding layout and a single token type embedding.
+        config.max_position_embeddings = 514
+        config.type_vocab_size = 1
+        return config
+
     for target, factory in (
         (RobertaTokenizer, lambda cls, *args, **kwargs: OfflineRobertaTokenizer()),
-        (RobertaConfig, lambda cls, *args, **kwargs: cls()),
+        (RobertaConfig, offline_roberta_config),
     ):
         had_own_factory = "from_pretrained" in target.__dict__
         original_factory = target.__dict__.get("from_pretrained")

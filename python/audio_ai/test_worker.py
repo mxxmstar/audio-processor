@@ -81,6 +81,13 @@ class AudioSrAdapterTests(unittest.TestCase):
             self.assertEqual(models, ["audiosr-basic"])
             self.assertEqual(errors, ["audiosr-basic: MODEL_HASH_DEFERRED"])
 
+    def test_audiosr_plotting_compatibility_avoids_optional_dependency(self) -> None:
+        with patch.dict(sys.modules, {"matplotlib": None}, clear=False):
+            sys.modules.pop("matplotlib.pyplot", None)
+            worker.ensure_audiosr_plotting_compatibility()
+            self.assertTrue(callable(sys.modules["matplotlib"].use))
+            self.assertIn("matplotlib.pyplot", sys.modules)
+
     def test_load_audiosr_uses_local_checkpoint_and_restores_downloader(self) -> None:
         checkpoint = Path("C:/models/audiosr-basic.bin")
         pipeline = types.ModuleType("audiosr.pipeline")
@@ -124,6 +131,8 @@ class AudioSrAdapterTests(unittest.TestCase):
             config = RobertaConfig.from_pretrained("missing-roberta")
             tokenizer = RobertaTokenizer.from_pretrained("missing-roberta")
             self.assertEqual(config.vocab_size, 50265)
+            self.assertEqual(config.max_position_embeddings, 514)
+            self.assertEqual(config.type_vocab_size, 1)
             encoded = tokenizer([""], max_length=4)
             self.assertEqual(tuple(encoded["input_ids"].shape), (1, 4))
             self.assertEqual(encoded["input_ids"].tolist(), [[0, 2, 1, 1]])
