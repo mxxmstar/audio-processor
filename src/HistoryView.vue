@@ -33,13 +33,14 @@ interface GroupView {
   items: HistoryItem[];
 }
 
-type KindFilter = "recognize" | "download";
+type KindFilter = "recognize" | "download" | "aria2";
 
 const props = defineProps<{ kind: KindFilter }>();
 
 const kindLabels: Record<string, string> = {
   recognize: "音频识别",
   download: "B站下载",
+  aria2: "aria2下载",
 };
 
 const records = ref<HistoryItem[]>([]);

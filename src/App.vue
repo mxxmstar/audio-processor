@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import DownloadView from "./DownloadView.vue";
 import RecognizerView from "./RecognizerView.vue";
 import HistoryView from "./HistoryView.vue";
+import Aria2View from "./Aria2View.vue";
 import {
   DownloadOutlined,
   AudioOutlined,
@@ -11,9 +12,10 @@ import {
   QrcodeOutlined,
   LogoutOutlined,
   UserOutlined,
+  CloudDownloadOutlined,
 } from "@ant-design/icons-vue";
 
-type ViewKey = "download" | "recognize" | "history" | "download-history";
+type ViewKey = "download" | "recognize" | "history" | "download-history" | "aria2-download" | "aria2-history";
 const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
 const openKeys = ref<string[]>([]);
@@ -30,6 +32,15 @@ const items = [
     ],
   },
   {
+    key: "aria2-group",
+    icon: h(CloudDownloadOutlined),
+    label: "aria2 下载",
+    children: [
+      { key: "aria2-download", icon: h(CloudDownloadOutlined), label: "下载" },
+      { key: "aria2-history", icon: h(HistoryOutlined), label: "历史记录" },
+    ],
+  },
+  {
     key: "recognize-group",
     icon: h(AudioOutlined),
     label: "音频识别",
@@ -42,7 +53,7 @@ const items = [
 
 function onMenuClick({ key }: { key: string }) {
   // 仅子项（无 children）才切换主视图
-  if (key === "recognize" || key === "history" || key === "download" || key === "download-history") {
+  if (key === "recognize" || key === "history" || key === "download" || key === "download-history" || key === "aria2-download" || key === "aria2-history") {
     active.value = key as ViewKey;
   }
 }
@@ -210,6 +221,15 @@ onUnmounted(stopPoll);
           v-else-if="active === 'download-history'"
           key="view-history-download"
           kind="download"
+        />
+        <aria2-view
+          v-else-if="active === 'aria2-download'"
+          key="view-aria2-download"
+        />
+        <history-view
+          v-else-if="active === 'aria2-history'"
+          key="view-history-aria2"
+          kind="aria2"
         />
       </keep-alive>
     </a-layout-content>

@@ -7,9 +7,14 @@ pub mod http_client; // HTTP 客户端封装（用于向外部服务器如 B 站
 pub mod biliapi; // B 站 API 封装（基于 http_client，封装 bilidownload 中的 B 站调用）
 pub mod bili_state; // 阶段 5：B 站功能共享状态（登录态目录 + 任务列表）
 pub mod history; // 通用历史记录模块（音频识别 / B站下载共用）
+pub mod aria2; // aria2 下载器模块
 
 use bili_state::BiliState;
 use commands::audio_quality::AudioQualityState;
+use commands::aria2::Aria2ManagerState;
+use aria2::Aria2Manager;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tauri::Manager;
 
 /// Tauri 应用入口（由 `main.rs` 调用）。
@@ -19,6 +24,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(BiliState::new())
         .manage(AudioQualityState::default())
+        .manage(Arc::new(RwLock::new(Aria2Manager::new(6800, "aria2_secret_token_2026"))) as Aria2ManagerState)
         .setup(|app| {
             // 阶段 5：注入配置目录到 B 站存储 / WBI 缓存层
             if let Ok(dir) = app.path().app_config_dir() {
@@ -62,6 +68,18 @@ pub fn run() {
             commands::bili::bili_check_login,
             commands::bili::bili_user_info,
             commands::bili::bili_logout,
+            // aria2 下载器命令
+            commands::aria2::aria2_start_service,
+            commands::aria2::aria2_stop_service,
+            commands::aria2::aria2_is_running,
+            commands::aria2::aria2_add_task,
+            commands::aria2::aria2_pause_task,
+            commands::aria2::aria2_resume_task,
+            commands::aria2::aria2_remove_task,
+            commands::aria2::aria2_list_tasks,
+            commands::aria2::aria2_refresh_tasks,
+            commands::aria2::aria2_get_history,
+            commands::aria2::aria2_cleanup_completed,
         ])
         // 注册对话框插件（前端用其打开文件选择框）
         .plugin(tauri_plugin_dialog::init())
