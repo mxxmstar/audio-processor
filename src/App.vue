@@ -192,13 +192,26 @@ onUnmounted(stopPoll);
     </a-layout-sider>
 
     <a-layout-content class="content">
-      <download-view
-        v-if="active === 'download'"
-        :logged-in="loggedIn"
-      />
-      <recognizer-view v-else-if="active === 'recognize'" />
-      <history-view v-else-if="active === 'history'" kind="recognize" />
-      <history-view v-else-if="active === 'download-history'" kind="download" />
+      <!-- keep-alive：缓存各视图组件实例，切换界面时不销毁，
+           保留下载任务列表/进度、识别结果等状态与事件监听 -->
+      <keep-alive>
+        <download-view
+          v-if="active === 'download'"
+          key="view-download"
+          :logged-in="loggedIn"
+        />
+        <recognizer-view v-else-if="active === 'recognize'" key="view-recognize" />
+        <history-view
+          v-else-if="active === 'history'"
+          key="view-history-recognize"
+          kind="recognize"
+        />
+        <history-view
+          v-else-if="active === 'download-history'"
+          key="view-history-download"
+          kind="download"
+        />
+      </keep-alive>
     </a-layout-content>
   </a-layout>
 

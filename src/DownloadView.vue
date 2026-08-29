@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -525,9 +525,16 @@ onUnmounted(() => {
   off3?.();
 });
 
-onUnmounted(() => {
-  off1?.();
-  off2?.();
+// 由 keep-alive 缓存后，切换界面不会销毁组件；此处仅在重新可见时
+// 与后端任务快照做一次轻量同步，确保展示与后端状态一致。
+// 仅当本地已有任务时才同步，避免「解析失败清空后又被回填」。
+onActivated(() => {
+  if (tasks.value.length === 0) return;
+  invoke<Task[]>("bili_list_tasks")
+    .then((t) => {
+      if (t.length > 0) tasks.value = t;
+    })
+    .catch(() => {});
 });
 </script>
 
