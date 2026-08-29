@@ -14,6 +14,7 @@ use tokio::time::timeout;
 pub const PROTOCOL_VERSION: u32 = 1;
 const MAX_PROTOCOL_LINE_BYTES: usize = 1024 * 1024;
 const MAX_EVENTS: usize = 4096;
+const MAX_ERROR_STDERR_BYTES: usize = 8 * 1024;
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -290,8 +291,11 @@ pub enum WorkerError {
     NoResult,
     #[error("AI Worker 输出路径与 Rust 分配路径不一致")]
     OutputPathMismatch,
-    #[error("AI Worker 进程异常退出，退出码: {0:?}")]
-    Exited(Option<i32>),
+    #[error("AI Worker 进程异常退出，退出码: {code:?}{stderr}")]
+    Exited {
+        code: Option<i32>,
+        stderr: String,
+    },
 }
 
 /// 启动一个 Worker，发送一次 process 请求并读取到 result/error。
@@ -451,7 +455,7 @@ pub async fn run_worker_with_callback(
             return Err(WorkerError::Cancelled);
         }
         if !status.success() {
-            return Err(WorkerError::Exited(status.code()));
+            return Err(worker_exit_error(status.code(), &stderr));
         }
         return Err(if ready {
             WorkerError::NoResult
@@ -460,7 +464,7 @@ pub async fn run_worker_with_callback(
         });
     };
     if !status.success() {
-        return Err(WorkerError::Exited(status.code()));
+        return Err(worker_exit_error(status.code(), &stderr));
     }
 
     Ok(WorkerRunOutput {
@@ -536,17 +540,17 @@ pub async fn probe_worker(spec: &WorkerSpec) -> Result<WorkerReady, WorkerError>
     drop(stdin);
     finish_child(&mut child, CHILD_EXIT_TIMEOUT).await;
     let status = child.wait().await.map_err(WorkerError::Stdout)?;
-    match stderr_task.await {
-        Ok(Ok(_)) => {}
+    let stderr = match stderr_task.await {
+        Ok(Ok(value)) => value,
         Ok(Err(error)) => return Err(WorkerError::Stderr(error)),
         Err(error) => {
             return Err(WorkerError::Protocol(format!(
                 "读取 AI Worker stderr 任务失败: {error}"
             )))
         }
-    }
+    };
     if !status.success() {
-        return Err(WorkerError::Exited(status.code()));
+        return Err(worker_exit_error(status.code(), &stderr));
     }
     Ok(WorkerReady {
         worker_version,
@@ -582,14 +586,19 @@ pub async fn install_model(
         .take()
         .ok_or_else(|| WorkerError::Protocol("模型安装器 stderr 未按协议打开".into()))?;
     let mut lines = BufReader::new(stderr).lines();
+    let mut stderr_text = String::new();
     while let Some(line) = lines.next_line().await.map_err(WorkerError::Stderr)? {
+        if !stderr_text.is_empty() {
+            stderr_text.push('\n');
+        }
+        stderr_text.push_str(&line);
         if let Some(callback) = &on_progress {
             callback(&line);
         }
     }
     let status = child.wait().await.map_err(WorkerError::Spawn)?;
     if !status.success() {
-        return Err(WorkerError::Exited(status.code()));
+        return Err(worker_exit_error(status.code(), &stderr_text));
     }
     Ok(())
 }
@@ -647,6 +656,31 @@ async fn read_stderr<R: AsyncRead + Unpin>(mut reader: R) -> Result<String, std:
         bytes.drain(..bytes.len() - MAX_STDERR_BYTES);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn worker_exit_error(code: Option<i32>, stderr: &str) -> WorkerError {
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("，stderr: {}", stderr_tail(stderr, MAX_ERROR_STDERR_BYTES))
+    };
+    WorkerError::Exited {
+        code,
+        stderr: detail,
+    }
+}
+
+fn stderr_tail(stderr: &str, max_bytes: usize) -> String {
+    if stderr.len() <= max_bytes {
+        return stderr.to_string();
+    }
+    let start = stderr
+        .char_indices()
+        .find(|(index, _)| *index >= stderr.len() - max_bytes)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    format!("...(stderr 已截断，显示末尾)...\n{}", &stderr[start..])
 }
 
 async fn finish_child(child: &mut Child, wait_for: Duration) {
@@ -732,6 +766,25 @@ mod tests {
         assert!(
             matches!(error, WorkerError::Remote { ref code, .. } if code == "INFERENCE_FAILED")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn fake_worker_exit_includes_stderr() {
+        let Some(spec) = WorkerSpec::fake("crash") else {
+            eprintln!("skip: Python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let request = AiProcessRequest::new("test-crash", Path::new("input.m4a"), &dir.join("out"));
+        let error = run_worker(&spec, &request, None).await.unwrap_err();
+        match error {
+            WorkerError::Exited { code, stderr } => {
+                assert_eq!(code, Some(1));
+                assert!(stderr.contains("fake worker process crash"));
+            }
+            other => panic!("expected worker exit error, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

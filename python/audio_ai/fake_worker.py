@@ -41,6 +41,9 @@ def process_request(
     request: dict[str, Any], mode: str, cancel_event: threading.Event
 ) -> None:
     request_id = str(request.get("request_id", ""))
+    if mode == "crash":
+        print("fake worker process crash", file=sys.stderr, flush=True)
+        os._exit(1)
     if mode == "error":
         emit_error(request_id, "INFERENCE_FAILED", "fake worker inference failure")
         return
@@ -98,7 +101,9 @@ def process_request(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--mode", choices=("success", "slow", "error", "invalid"), default="success"
+        "--mode",
+        choices=("success", "slow", "error", "invalid", "crash"),
+        default="success",
     )
     args = parser.parse_args()
 
