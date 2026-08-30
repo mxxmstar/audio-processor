@@ -27,6 +27,29 @@ from typing import Any
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+
+def _force_utf8_stdio() -> None:
+    """强制标准流使用 UTF-8。
+
+    Rust 端以 UTF-8 字节写入 JSONL 请求，但 Windows 上 sys.stdin 默认按区域
+    编码（如 cp936/GBK）解码。当路径含非 ASCII 字符（日文、罕见汉字等）且无法
+    用区域编码表示时，解码会失败或产生乱码，导致 Worker 判定「输入音频不存在」。
+    这里在读取任何请求前把 stdin/stdout/stderr 统一改为 UTF-8；
+    stdout 同理，因为进度消息使用 ensure_ascii=False 输出中文。
+    """
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
+
+
+_force_utf8_stdio()
+
 import numpy as np
 import torch
 
@@ -719,7 +742,10 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     output_path = str(request.get("output_path", ""))
     model_id = str(request.get("model_id", ""))
     if not input_path or not Path(input_path).is_file():
-        raise WorkerFailure("UNSUPPORTED_INPUT", "input audio does not exist")
+        # 回显实际收到的路径，便于定位「区域编码导致非 ASCII 路径被破坏」一类问题
+        raise WorkerFailure(
+            "UNSUPPORTED_INPUT", f"input audio does not exist: {input_path!r}"
+        )
     if not output_path or Path(output_path).resolve() == Path(input_path).resolve():
         raise WorkerFailure("INVALID_OUTPUT", "output path must differ from input path")
     if not model_id:

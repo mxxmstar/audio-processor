@@ -322,6 +322,9 @@ pub async fn run_worker_with_callback(
         .args(&spec.args)
         .envs(spec.env.iter().map(|(key, value)| (key, value)))
         .env("PYTHONUNBUFFERED", "1")
+        // 强制 Python stdio 使用 UTF-8：Windows 默认按区域编码（cp936/GBK）
+        // 解码 stdin，会使含非 ASCII 字符（如日文）的路径被破坏。
+        .env("PYTHONIOENCODING", "utf-8")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -481,6 +484,7 @@ pub async fn probe_worker(spec: &WorkerSpec) -> Result<WorkerReady, WorkerError>
         .args(&spec.args)
         .envs(spec.env.iter().map(|(key, value)| (key, value)))
         .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -575,6 +579,7 @@ pub async fn install_model(
         .arg(workers.to_string())
         .envs(spec.env.iter().map(|(key, value)| (key, value)))
         .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
