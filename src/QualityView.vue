@@ -162,12 +162,14 @@ async function start() {
   }
   starting.value = true;
   try {
+    // 注意：AudioQualityStartInput 使用 serde rename_all = "camelCase"，
+    // 因此字段名必须为驼峰（inputPath / modelId / outputSampleRate）
     const task = await invoke<QualityTask>("audio_quality_start", {
       input: {
-        input_path: inputPath.value,
-        model_id: modelId.value,
+        inputPath: inputPath.value,
+        modelId: modelId.value,
         device: device.value,
-        output_sample_rate: sampleRate.value,
+        outputSampleRate: sampleRate.value,
       },
     });
     activeTask.value = task;
