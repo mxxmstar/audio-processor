@@ -102,13 +102,16 @@ pub fn check_port(port: u16) -> Result<bool, String> {
         .map_err(|e: std::net::AddrParseError| format!("地址解析失败: {e}"))?;
     match TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)) {
         Ok(_) => Ok(true),
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                Ok(false)
-            } else {
-                Err(format!("检查端口 {port} 失败: {e}"))
-            }
-        }
+        Err(e) => match e.kind() {
+            // ConnectionRefused → 端口未被占用
+            std::io::ErrorKind::ConnectionRefused => Ok(false),
+            // TimedOut / WouldBlock / ConnectionReset → 端口被占用（有进程在监听但未响应或连接被重置）
+            std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ConnectionReset => Ok(true),
+            // 其他错误（如权限不足等）才报错
+            _ => Err(format!("检查端口 {port} 失败: {e}")),
+        },
     }
 }
 
@@ -195,7 +198,8 @@ fn run_netstat() -> Result<String, String> {
         return Err(format!("netstat 执行失败: {stderr}"));
     }
 
-    String::from_utf8(output.stdout).map_err(|e| format!("netstat 输出编码错误: {e}"))
+    // 中文 Windows 下 netstat 输出为 GBK 编码，使用 lossy 转换避免解析失败
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// 解析 netstat -ano 的输出
