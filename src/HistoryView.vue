@@ -33,7 +33,7 @@ interface GroupView {
   items: HistoryItem[];
 }
 
-type KindFilter = "recognize" | "download" | "aria2";
+type KindFilter = "recognize" | "download" | "aria2" | "enhance";
 
 const props = defineProps<{ kind: KindFilter }>();
 
@@ -41,6 +41,7 @@ const kindLabels: Record<string, string> = {
   recognize: "音频识别",
   download: "B站下载",
   aria2: "aria2下载",
+  enhance: "音质提升",
 };
 
 const records = ref<HistoryItem[]>([]);
@@ -222,6 +223,19 @@ function payloadText(json: string): string {
   }
 }
 
+function kindColor(kind: string): string {
+  switch (kind) {
+    case "download":
+      return "blue";
+    case "aria2":
+      return "cyan";
+    case "enhance":
+      return "purple";
+    default:
+      return "green";
+  }
+}
+
 onMounted(load);
 </script>
 
@@ -295,7 +309,7 @@ onMounted(load);
                   />
                   <a-list-item-meta>
                     <template #title>
-                      <a-tag :color="item.kind === 'download' ? 'blue' : 'green'">
+                      <a-tag :color="kindColor(item.kind)">
                         {{ kindLabels[item.kind] ?? item.kind }}
                       </a-tag>
                       <a-typography-text strong>{{ item.title }}</a-typography-text>
@@ -312,7 +326,7 @@ onMounted(load);
                   <template #actions>
                     <a-button type="link" size="small" @click="view(item)">查看</a-button>
                     <a-button
-                      v-if="item.kind === 'download' && item.file_path"
+                      v-if="item.file_path"
                       type="link"
                       size="small"
                       @click="openDir(item)"

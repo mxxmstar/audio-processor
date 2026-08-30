@@ -5,6 +5,7 @@ import DownloadView from "./DownloadView.vue";
 import RecognizerView from "./RecognizerView.vue";
 import HistoryView from "./HistoryView.vue";
 import Aria2View from "./Aria2View.vue";
+import QualityView from "./QualityView.vue";
 import {
   DownloadOutlined,
   AudioOutlined,
@@ -13,9 +14,18 @@ import {
   LogoutOutlined,
   UserOutlined,
   CloudDownloadOutlined,
+  SoundOutlined,
 } from "@ant-design/icons-vue";
 
-type ViewKey = "download" | "recognize" | "history" | "download-history" | "aria2-download" | "aria2-history";
+type ViewKey =
+  | "download"
+  | "recognize"
+  | "history"
+  | "download-history"
+  | "aria2-download"
+  | "aria2-history"
+  | "quality"
+  | "quality-history";
 const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
 const openKeys = ref<string[]>([]);
@@ -49,11 +59,32 @@ const items = [
       { key: "history", icon: h(HistoryOutlined), label: "历史记录" },
     ],
   },
+  {
+    key: "quality-group",
+    icon: h(SoundOutlined),
+    label: "音频品质提升",
+    children: [
+      { key: "quality", icon: h(SoundOutlined), label: "音质提升" },
+      { key: "quality-history", icon: h(HistoryOutlined), label: "历史记录" },
+    ],
+  },
+];
+
+// 可切换主视图的子项（父分组项不参与切换）
+const leafKeys: string[] = [
+  "recognize",
+  "history",
+  "download",
+  "download-history",
+  "aria2-download",
+  "aria2-history",
+  "quality",
+  "quality-history",
 ];
 
 function onMenuClick({ key }: { key: string }) {
   // 仅子项（无 children）才切换主视图
-  if (key === "recognize" || key === "history" || key === "download" || key === "download-history" || key === "aria2-download" || key === "aria2-history") {
+  if (leafKeys.includes(key)) {
     active.value = key as ViewKey;
   }
 }
@@ -230,6 +261,12 @@ onUnmounted(stopPoll);
           v-else-if="active === 'aria2-history'"
           key="view-history-aria2"
           kind="aria2"
+        />
+        <quality-view v-else-if="active === 'quality'" key="view-quality" />
+        <history-view
+          v-else-if="active === 'quality-history'"
+          key="view-history-quality"
+          kind="enhance"
         />
       </keep-alive>
     </a-layout-content>

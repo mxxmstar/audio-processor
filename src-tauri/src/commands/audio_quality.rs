@@ -183,7 +183,7 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
 ///
 /// `workers` 控制断点 Range 下载并发数，限制在 1..=32；模型路径和
 /// SHA-256 由 Python 安装器从 manifest.json 读取，Rust 不接受外部 URL。
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn audio_quality_download_model(
     model_id: String,
     workers: Option<u32>,
@@ -348,6 +348,10 @@ pub fn audio_quality_start(
                 });
             }
         }
+        // 终态写入历史库（含成功 / 失败 / 取消）
+        if let Some(task) = state_for_task.list().into_iter().find(|t| t.id == id) {
+            record_history(&app_for_task, &task);
+        }
         emit_task_progress(&app_for_task, &state_for_task, &id);
         state_for_task.remove_cancel(&id);
     });
@@ -355,7 +359,7 @@ pub fn audio_quality_start(
     Ok(task)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn audio_quality_cancel(
     task_id: String,
     state: State<'_, AudioQualityState>,
@@ -475,6 +479,44 @@ fn emit_task_progress(app: &AppHandle, state: &AudioQualityState, task_id: &str)
         return;
     };
     let _ = app.emit("audio-quality-progress", task);
+}
+
+/// 任务进入终态（completed / failed / cancelled）时写入通用历史库。
+/// 失败仅打印日志，不影响任务本身的结果。
+fn record_history(app: &AppHandle, task: &AudioQualityTask) {
+    if !matches!(task.status.as_str(), "completed" | "failed" | "cancelled") {
+        return;
+    }
+    let Ok(conn) = crate::history::open_db(&crate::commands::history_dir(app)) else {
+        return;
+    };
+    let title = Path::new(&task.input_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| task.input_path.clone());
+    let status_label = match task.status.as_str() {
+        "completed" => "已完成",
+        "failed" => "失败",
+        _ => "已取消",
+    };
+    let subtitle = format!("{} · {}", task.model_id, status_label);
+    let payload = serde_json::to_string(task).unwrap_or_default();
+    // 仅成功时才存在有效输出文件，失败/取消留空以免「打开目录」指向不存在的文件
+    let file_path = if task.status == "completed" {
+        task.output_path.clone()
+    } else {
+        String::new()
+    };
+    if let Err(e) = crate::history::insert(
+        &conn,
+        crate::history::HistoryKind::Enhance,
+        &title,
+        &subtitle,
+        &payload,
+        &file_path,
+    ) {
+        eprintln!("[history] 写入音质提升历史失败: {e}");
+    }
 }
 
 fn chrono_like_timestamp() -> u128 {

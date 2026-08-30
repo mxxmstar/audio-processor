@@ -13,6 +13,8 @@ pub enum HistoryKind {
     Recognize,
     /// B站下载
     Download,
+    /// 音频品质提升（AI 增强）
+    Enhance,
 }
 
 impl HistoryKind {
@@ -21,6 +23,7 @@ impl HistoryKind {
         match self {
             HistoryKind::Recognize => "recognize",
             HistoryKind::Download => "download",
+            HistoryKind::Enhance => "enhance",
         }
     }
 
@@ -29,6 +32,7 @@ impl HistoryKind {
         match self {
             HistoryKind::Recognize => "音频识别",
             HistoryKind::Download => "B站下载",
+            HistoryKind::Enhance => "音质提升",
         }
     }
 
@@ -36,6 +40,7 @@ impl HistoryKind {
     pub fn from_str(s: &str) -> Self {
         match s {
             "download" => HistoryKind::Download,
+            "enhance" => HistoryKind::Enhance,
             _ => HistoryKind::Recognize,
         }
     }
