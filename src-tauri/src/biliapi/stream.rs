@@ -53,8 +53,10 @@ pub fn select_video_url(medias: &[Media], format: MediaFormat) -> Option<String>
 /// 返回 `None` 表示 DASH 中没有任何音轨。
 pub fn select_audio_url(dash: &Dash) -> Option<String> {
     if let Some(flac) = &dash.flac {
-        if !flac.audio.base_url.is_empty() {
-            return Some(flac.audio.base_url.clone());
+        if let Some(audio) = &flac.audio {
+            if !audio.base_url.is_empty() {
+                return Some(audio.base_url.clone());
+            }
         }
     }
     let mut best: Option<&Media> = None;
@@ -153,7 +155,7 @@ mod tests {
             video: vec![],
             audio: vec![media(30280, 0, "aac")],
             flac: Some(Flac {
-                audio: media(30251, 0, "flac"),
+                audio: Some(media(30251, 0, "flac")),
             }),
         };
         assert_eq!(select_audio_url(&dash), Some("flac".to_string()));

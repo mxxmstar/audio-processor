@@ -5,13 +5,22 @@
 //! - 登录态（生成二维码 / 轮询 / 校验 / 登出）
 //! - 启动并发下载，进度经 Tauri 事件 `download-progress` 推送到前端
 
+use crate::audio_rename::{self, AutoRenameConfig};
+use crate::audio_quality::ai_worker::{
+    self, AiProcessRequest, WorkerError, WorkerEvent, WorkerEventCallback, WorkerSpec,
+};
 use crate::bili_state::BiliState;
 use crate::biliapi::client::BiliClient;
 use crate::biliapi::login;
-use crate::biliapi::task::{DownloadMode, DownloadTask, TaskGroup};
+use crate::biliapi::media;
+use crate::biliapi::task::{
+    DownloadMode, DownloadTask, QualityStatus, RecognitionStatus, TaskGroup,
+};
 use crate::biliapi::types::{MediaFormat, QrInfo};
 use crate::biliapi::video;
+use crate::recognizer::run_identify;
 use serde::Serialize;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -40,6 +49,81 @@ pub struct StartDownloadInput {
     pub output_dir: Option<String>,
     #[serde(default)]
     pub concurrency: Option<usize>,
+    /// 仅下载指定 ID 的任务（用于前端手动勾选）。
+    /// 为 None 时下载全部已解析任务。
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
+    /// 是否在仅音频下载完成后自动识别并重命名；缺省开启。
+    #[serde(default)]
+    pub auto_rename: Option<bool>,
+    /// 自动识别的最低置信度，缺省 70%。
+    #[serde(default)]
+    pub confidence_threshold: Option<f64>,
+    /// 是否在仅音频下载完成后启动 Python AI 增强；默认关闭。
+    #[serde(default)]
+    pub python_ai_enhancement_enabled: Option<bool>,
+    /// AI 模型 ID；默认 audiosr-basic。
+    #[serde(default)]
+    pub python_ai_model_id: Option<String>,
+    /// AI 推理设备，例如 auto / cpu / cuda。
+    #[serde(default)]
+    pub python_ai_device: Option<String>,
+    /// AI 单次处理的音频秒数。
+    #[serde(default)]
+    pub python_ai_chunk_seconds: Option<f64>,
+    /// AI 分块重叠秒数。
+    #[serde(default)]
+    pub python_ai_overlap_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PythonAiEnhancementConfig {
+    enabled: bool,
+    model_id: String,
+    device: String,
+    chunk_seconds: f64,
+    overlap_seconds: f64,
+}
+
+fn validate_python_ai_config(config: &PythonAiEnhancementConfig) -> Result<(), String> {
+    if config.model_id.trim().is_empty() {
+        return Err("pythonAiModelId 不能为空".into());
+    }
+    if !matches!(config.device.as_str(), "auto" | "cpu" | "cuda") {
+        return Err("pythonAiDevice 必须是 auto、cpu 或 cuda".into());
+    }
+    if !(config.chunk_seconds.is_finite() && config.chunk_seconds > 0.0) {
+        return Err("pythonAiChunkSeconds 必须是正数".into());
+    }
+    if !(config.overlap_seconds.is_finite()
+        && config.overlap_seconds >= 0.0
+        && config.overlap_seconds < config.chunk_seconds)
+    {
+        return Err("pythonAiOverlapSeconds 必须大于等于 0 且小于分块长度".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioPostprocessStage {
+    Recognize,
+    Enhance,
+    Encode,
+}
+
+fn audio_postprocess_plan(
+    recognition_enabled: bool,
+    enhancement_enabled: bool,
+) -> Vec<AudioPostprocessStage> {
+    let mut stages = Vec::with_capacity(3);
+    if recognition_enabled {
+        stages.push(AudioPostprocessStage::Recognize);
+    }
+    if enhancement_enabled {
+        stages.push(AudioPostprocessStage::Enhance);
+    }
+    stages.push(AudioPostprocessStage::Encode);
+    stages
 }
 
 /// 生成的登录二维码
@@ -77,6 +161,20 @@ pub struct ProgressEvent {
     pub total: u64,
     pub speed: u64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub source_title: String,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub quality_status: Option<String>,
+    #[serde(default)]
+    pub quality_model_id: Option<String>,
+    #[serde(default)]
+    pub quality_output_path: Option<String>,
+    #[serde(default)]
+    pub quality_error: Option<String>,
 }
 
 /// 解析完成事件（带最终任务列表）
@@ -119,7 +217,10 @@ fn parse_format(label: &str) -> i64 {
 
 /// 从用户输入识别目标并解析为下载任务（不立即下载）
 #[tauri::command]
-pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> Result<Vec<DownloadTask>, String> {
+pub async fn bili_resolve(
+    input: ResolveInput,
+    state: State<'_, BiliState>,
+) -> Result<Vec<DownloadTask>, String> {
     let sessdata = login::load_and_check(state.config_dir_opt().as_deref())
         .await
         .map_err(|e| e.to_string())?
@@ -198,8 +299,7 @@ pub async fn bili_resolve(input: ResolveInput, state: State<'_, BiliState>) -> R
             .unwrap_or_else(|| ".".to_string())
     });
 
-    let tasks: Vec<DownloadTask> =
-        DownloadTask::from_resolves(&results, mode, &root, group_opt);
+    let tasks: Vec<DownloadTask> = DownloadTask::from_resolves(&results, mode, &root, group_opt);
     if tasks.is_empty() {
         return Err("解析成功，但未找到可下载的音视频流".to_string());
     }
@@ -272,11 +372,20 @@ pub async fn bili_resolve_async(
                     Ok(info) => {
                         if info.ugc_season.id > 0 {
                             // 属于合集：改用合集解析，并更新总数展示
-                            if let Ok((bvids, _)) =
-                                video::get_collection_bvids(&client, &info.owner.mid.to_string(), &info.ugc_season.id.to_string()).await
+                            if let Ok((bvids, _)) = video::get_collection_bvids(
+                                &client,
+                                &info.owner.mid.to_string(),
+                                &info.ugc_season.id.to_string(),
+                            )
+                            .await
                             {
                                 total = bvids.len();
-                                emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
+                                emit_resolve_progress(
+                                    &app_for_cb,
+                                    0,
+                                    total.max(1),
+                                    "开始解析合集…",
+                                );
                             }
                             match video::resolve_collection(
                                 &client,
@@ -302,40 +411,42 @@ pub async fn bili_resolve_async(
                     Err(e) => Err(e),
                 }
             }
-            Target::Av(aid) => {
-                match video::get_video_info(&client, &bv_from_aid(*aid)).await {
-                    Ok(info) => {
-                        if info.ugc_season.id > 0 {
-                            if let Ok((bvids, _)) =
-                                video::get_collection_bvids(&client, &info.owner.mid.to_string(), &info.ugc_season.id.to_string()).await
-                            {
-                                total = bvids.len();
-                                emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
-                            }
-                            match video::resolve_collection(
-                                &client,
-                                &info.owner.mid.to_string(),
-                                &info.ugc_season.id.to_string(),
-                                prefer,
-                                cb,
-                            )
-                            .await
-                            {
-                                Ok((r, g)) => {
-                                    group_opt = Some(g);
-                                    Ok(r)
-                                }
-                                Err(e) => Err(e),
-                            }
-                        } else {
-                            let r = video::resolve_video(&client, &info.bvid, prefer).await;
-                            cb.as_ref().map(|f| f(1, 1, &info.bvid));
-                            r.map(|r| vec![r])
+            Target::Av(aid) => match video::get_video_info(&client, &bv_from_aid(*aid)).await {
+                Ok(info) => {
+                    if info.ugc_season.id > 0 {
+                        if let Ok((bvids, _)) = video::get_collection_bvids(
+                            &client,
+                            &info.owner.mid.to_string(),
+                            &info.ugc_season.id.to_string(),
+                        )
+                        .await
+                        {
+                            total = bvids.len();
+                            emit_resolve_progress(&app_for_cb, 0, total.max(1), "开始解析合集…");
                         }
+                        match video::resolve_collection(
+                            &client,
+                            &info.owner.mid.to_string(),
+                            &info.ugc_season.id.to_string(),
+                            prefer,
+                            cb,
+                        )
+                        .await
+                        {
+                            Ok((r, g)) => {
+                                group_opt = Some(g);
+                                Ok(r)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        let r = video::resolve_video(&client, &info.bvid, prefer).await;
+                        cb.as_ref().map(|f| f(1, 1, &info.bvid));
+                        r.map(|r| vec![r])
                     }
-                    Err(e) => Err(e),
                 }
-            }
+                Err(e) => Err(e),
+            },
             Target::Collection(mid, sid) => {
                 match video::resolve_collection(&client, mid, sid, prefer, cb).await {
                     Ok((r, g)) => {
@@ -408,14 +519,390 @@ fn emit_resolve_progress(app: &AppHandle, done: usize, total: usize, title: &str
             phase: "resolve".into(),
             task_id: format!("resolve:{}/{}", done, total),
             title: title.to_string(),
-            status: if done >= total { "Completed" } else { "Downloading" }.into(),
+            status: if done >= total {
+                "Completed"
+            } else {
+                "Downloading"
+            }
+            .into(),
             percent,
             downloaded: 0,
             total: 0,
             speed: 0,
             error: None,
+            source_title: title.to_string(),
+            output_path: None,
+            confidence: None,
+            quality_status: None,
+            quality_model_id: None,
+            quality_output_path: None,
+            quality_error: None,
         },
     );
+}
+
+/// 发送识别/重命名阶段的任务事件。
+fn emit_audio_postprocess(app: &AppHandle, task: &DownloadTask, phase: &str, percent: f64) {
+    let _ = app.emit(
+        "download-progress",
+        ProgressEvent {
+            phase: phase.into(),
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            status: format!("{:?}", task.recognition_status),
+            percent,
+            downloaded: 0,
+            total: 0,
+            speed: 0,
+            error: task.recognition_error.clone(),
+            source_title: if task.source_title.is_empty() {
+                task.title.clone()
+            } else {
+                task.source_title.clone()
+            },
+            output_path: task.output_path.clone(),
+            confidence: task.recognition_result.as_ref().map(|r| r.confidence),
+            quality_status: Some(format!("{:?}", task.quality_status)),
+            quality_model_id: task.quality_model_id.clone(),
+            quality_output_path: task.quality_output_path.clone(),
+            quality_error: task.quality_error.clone(),
+        },
+    );
+}
+
+fn emit_quality_postprocess(
+    app: &AppHandle,
+    task: &DownloadTask,
+    percent: f64,
+    message: Option<String>,
+) {
+    let _ = app.emit(
+        "download-progress",
+        ProgressEvent {
+            phase: "enhance".into(),
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            status: format!("{:?}", task.quality_status),
+            percent: percent.clamp(0.0, 1.0),
+            downloaded: 0,
+            total: 0,
+            speed: 0,
+            error: task.error.clone(),
+            source_title: if task.source_title.is_empty() {
+                task.title.clone()
+            } else {
+                task.source_title.clone()
+            },
+            output_path: task.output_path.clone(),
+            confidence: task.recognition_result.as_ref().map(|r| r.confidence),
+            quality_status: Some(format!("{:?}", task.quality_status)),
+            quality_model_id: task.quality_model_id.clone(),
+            quality_output_path: task.quality_output_path.clone(),
+            quality_error: task.quality_error.clone().or(message),
+        },
+    );
+}
+
+fn enhancement_worker_spec() -> Option<WorkerSpec> {
+    if let Some(path) = std::env::var_os("AUDIO_AI_WORKER") {
+        return Some(WorkerSpec::new(path));
+    }
+    if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
+        return WorkerSpec::fake("success");
+    }
+    WorkerSpec::production()
+}
+
+fn quality_output_path(task: &DownloadTask) -> std::path::PathBuf {
+    let mut output = audio_rename::staging_path(
+        Path::new(&task.output_dir),
+        &format!("{}-ai", task.id),
+        "flac",
+    );
+    output.set_extension("flac");
+    output
+}
+
+const AI_MASTER_DURATION_TOLERANCE_SECONDS: f64 = 0.1;
+
+fn validate_ai_master_output(
+    input: &media::AudioProbe,
+    output: &media::AudioProbe,
+    worker_result: &ai_worker::WorkerResult,
+) -> Result<(), WorkerError> {
+    if !output.codec_name.eq_ignore_ascii_case("flac") {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 编码器错误: 期望 flac，实际 {}",
+            output.codec_name
+        )));
+    }
+    if worker_result.sample_rate != 48_000 || output.sample_rate != worker_result.sample_rate {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 采样率不一致: Worker {} Hz，文件 {} Hz",
+            worker_result.sample_rate, output.sample_rate
+        )));
+    }
+    if worker_result.channels != input.channels || output.channels != input.channels {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 声道数不一致: 输入 {}，Worker {}，文件 {}",
+            input.channels, worker_result.channels, output.channels
+        )));
+    }
+    if output.duration_seconds <= 0.0
+        || (output.duration_seconds - input.duration_seconds).abs()
+            > AI_MASTER_DURATION_TOLERANCE_SECONDS
+        || (output.duration_seconds - worker_result.duration_seconds).abs()
+            > AI_MASTER_DURATION_TOLERANCE_SECONDS
+    {
+        return Err(WorkerError::Protocol(format!(
+            "AI master 时长不一致: 输入 {:.3}s，Worker {:.3}s，文件 {:.3}s",
+            input.duration_seconds,
+            worker_result.duration_seconds,
+            output.duration_seconds
+        )));
+    }
+    Ok(())
+}
+
+async fn enhance_audio_task(
+    app: &AppHandle,
+    task: &mut DownloadTask,
+    config: &PythonAiEnhancementConfig,
+    staged: &Path,
+) -> Result<std::path::PathBuf, WorkerError> {
+    let output = quality_output_path(task);
+    let input_probe = media::probe_audio(staged).map_err(|error| {
+        WorkerError::Protocol(format!("无法探测 AI 输入文件: {error}"))
+    })?;
+    let Some(spec) = enhancement_worker_spec() else {
+        return Err(WorkerError::Spawn(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "找不到 Python AI Worker 或 Python 运行时",
+        )));
+    };
+    let request = AiProcessRequest {
+        request_id: format!("{}-ai", task.id),
+        input_path: staged.to_string_lossy().into_owned(),
+        output_path: output.to_string_lossy().into_owned(),
+        model_id: config.model_id.clone(),
+        device: config.device.clone(),
+        chunk_seconds: config.chunk_seconds,
+        overlap_seconds: config.overlap_seconds,
+        output_sample_rate: Some(48_000),
+    };
+    let task_for_event = task.clone();
+    let app_for_event = app.clone();
+    let callback: WorkerEventCallback = Arc::new(move |event| {
+        let status = match event {
+            WorkerEvent::Ready { .. } => "CheckingRuntime",
+            WorkerEvent::Progress { phase, .. } if phase == "load_model" => "LoadingModel",
+            WorkerEvent::Progress { .. } => "Enhancing",
+            WorkerEvent::Completed { .. } => "Completed",
+            WorkerEvent::Error { .. } => "Failed",
+        };
+        let percent = match event {
+            WorkerEvent::Progress { percent, .. } => percent / 100.0,
+            WorkerEvent::Completed { .. } => 1.0,
+            _ => 0.0,
+        };
+        let mut snapshot = task_for_event.clone();
+        snapshot.quality_status = match status {
+            "CheckingRuntime" => QualityStatus::CheckingRuntime,
+            "LoadingModel" => QualityStatus::LoadingModel,
+            "Enhancing" => QualityStatus::Enhancing,
+            "Completed" => QualityStatus::Completed,
+            _ => QualityStatus::Failed,
+        };
+        emit_quality_postprocess(&app_for_event, &snapshot, percent, None);
+    });
+
+    let run = ai_worker::run_worker_with_callback(&spec, &request, None, Some(callback)).await?;
+    if run.result.output_path != output.to_string_lossy()
+        || !output.is_file()
+        || std::fs::metadata(&output)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+    {
+        return Err(WorkerError::Protocol(
+            "AI Worker 返回的输出文件不存在或为空".into(),
+        ));
+    }
+    let output_probe = media::probe_audio(&output).map_err(|error| {
+        WorkerError::Protocol(format!("无法探测 AI master: {error}"))
+    })?;
+    validate_ai_master_output(&input_probe, &output_probe, &run.result)?;
+    Ok(output)
+}
+
+/// 下载完成后的 AudioOnly 后处理：识别、转码为 MP3、生成最终文件名。
+///
+/// 识别失败不会让下载任务变成 Failed；任务仍表示下载成功，只通过独立的
+/// `recognition_status` 和 `recognition_error` 告知后处理结果。
+async fn postprocess_audio_task(
+    app: &AppHandle,
+    task: &mut DownloadTask,
+    fpcalc_path: Option<&Path>,
+    config: &AutoRenameConfig,
+    quality_config: &PythonAiEnhancementConfig,
+) {
+    if task.mode != DownloadMode::AudioOnly
+        || task.status != crate::biliapi::task::DownloadStatus::Completed
+    {
+        return;
+    }
+
+    let dir = Path::new(&task.output_dir).to_path_buf();
+    let source_title = if task.source_title.is_empty() {
+        task.title.clone()
+    } else {
+        task.source_title.clone()
+    };
+    task.source_title = source_title.clone();
+    let staged = task.staged_file();
+    let postprocess_plan = audio_postprocess_plan(config.enabled, quality_config.enabled);
+    if !staged.exists() {
+        task.recognition_status = RecognitionStatus::Failed;
+        task.recognition_error = Some(format!("下载完成文件不存在: {}", staged.display()));
+        if quality_config.enabled {
+            task.quality_status = QualityStatus::Failed;
+            task.quality_model_id = Some(quality_config.model_id.clone());
+            task.quality_error = Some("AI 增强输入文件不存在".into());
+            emit_quality_postprocess(app, task, 1.0, None);
+        }
+        emit_audio_postprocess(app, task, "recognize", 0.0);
+        return;
+    }
+
+    let mut stem = audio_rename::fallback_stem(&source_title);
+    if postprocess_plan.contains(&AudioPostprocessStage::Recognize) {
+        task.recognition_status = RecognitionStatus::Recognizing;
+        task.recognition_error = None;
+        emit_audio_postprocess(app, task, "recognize", 0.0);
+        let identify_result = match fpcalc_path {
+            Some(path) => run_identify(&path.to_string_lossy(), &staged.to_string_lossy()).await,
+            None => Err(crate::recognizer::AppError::Fingerprint(
+                "找不到 fpcalc.exe".into(),
+            )),
+        };
+        match identify_result {
+            Ok(info) => {
+                let confidence_ok = info.confidence >= config.confidence_threshold;
+                let title_ok = !info.title.trim().is_empty();
+                task.recognition_result = Some(info.clone());
+                if confidence_ok && title_ok {
+                    stem = audio_rename::recognized_stem(&info, &source_title, &config.template);
+                    // 只有后续 MP3 转码和文件移动都成功后，才标记为 Renamed。
+                    task.recognition_status = RecognitionStatus::Recognizing;
+                } else {
+                    task.recognition_status = if confidence_ok {
+                        RecognitionStatus::NoMatch
+                    } else {
+                        RecognitionStatus::BelowThreshold
+                    };
+                    task.recognition_error = Some(format!(
+                        "识别结果置信度 {:.1}% 未达到 {:.1}% 或缺少曲目标题，已使用原始标题",
+                        info.confidence, config.confidence_threshold
+                    ));
+                }
+            }
+            Err(e) => {
+                task.recognition_status = if e.to_string().contains("未识别到") {
+                    RecognitionStatus::NoMatch
+                } else {
+                    RecognitionStatus::Failed
+                };
+                task.recognition_error = Some(e.to_string());
+            }
+        }
+    } else {
+        task.recognition_status = RecognitionStatus::Disabled;
+    }
+    emit_audio_postprocess(app, task, "recognize", 1.0);
+
+    let mut source_for_encode = staged.clone();
+    if postprocess_plan.contains(&AudioPostprocessStage::Enhance) {
+        task.quality_status = QualityStatus::CheckingRuntime;
+        task.quality_model_id = Some(quality_config.model_id.clone());
+        task.quality_error = None;
+        emit_quality_postprocess(app, task, 0.0, Some("正在准备 Python AI 增强".into()));
+        match enhance_audio_task(app, task, quality_config, &staged).await {
+            Ok(enhanced) => {
+                task.quality_status = QualityStatus::Completed;
+                task.quality_output_path = Some(enhanced.to_string_lossy().into_owned());
+                source_for_encode = enhanced;
+                emit_quality_postprocess(app, task, 1.0, Some("AI 增强完成".into()));
+            }
+            Err(error) => {
+                task.quality_status = QualityStatus::Failed;
+                task.quality_error = Some(error.to_string());
+                let failed_output = quality_output_path(task);
+                let _ = std::fs::remove_file(failed_output);
+                emit_quality_postprocess(app, task, 1.0, Some("AI 增强失败，已使用原始音频".into()));
+            }
+        }
+    }
+
+    // 识别和 AI 都完成后，最终按用户要求统一转码为 mp3。
+    let mp3_part = dir.join(format!(
+        ".audio-processor-{}.mp3.part",
+        audio_rename::sanitize_component(&task.id).replace(' ', "_")
+    ));
+    let _ = std::fs::remove_file(&mp3_part);
+    if let Err(e) = media::transcode_audio(
+        &source_for_encode.to_string_lossy(),
+        &mp3_part.to_string_lossy(),
+    ) {
+        task.recognition_status = RecognitionStatus::RenameFailed;
+        task.recognition_error = Some(e.to_string());
+        // ffmpeg 不可用时仍保留可播放的原始 m4a，并去掉 .part 后缀。
+        match audio_rename::move_to_unique(&staged, &dir, &source_title, "m4a") {
+            Ok(path) => {
+                task.output_path = Some(path.to_string_lossy().into_owned());
+                task.staged_path = None;
+            }
+            Err(fallback_err) => {
+                task.recognition_error = Some(format!("{}；原始文件兜底失败: {}", e, fallback_err));
+            }
+        }
+        emit_audio_postprocess(app, task, "rename", 1.0);
+        return;
+    }
+
+    emit_audio_postprocess(app, task, "rename", 0.5);
+    match audio_rename::move_to_unique(&mp3_part, &dir, &stem, &config.extension) {
+        Ok(path) => {
+            let _ = std::fs::remove_file(&staged);
+            if source_for_encode != staged {
+                let _ = std::fs::remove_file(&source_for_encode);
+                task.quality_output_path = None;
+            }
+            task.title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&stem)
+                .to_string();
+            task.output_path = Some(path.to_string_lossy().into_owned());
+            task.staged_path = None;
+            if task.recognition_status == RecognitionStatus::Recognizing {
+                task.recognition_status = RecognitionStatus::Renamed;
+            }
+        }
+        Err(e) => {
+            task.recognition_status = RecognitionStatus::RenameFailed;
+            task.recognition_error = Some(e.clone());
+            let _ = std::fs::remove_file(&mp3_part);
+            if source_for_encode != staged {
+                let _ = std::fs::remove_file(&source_for_encode);
+                task.quality_output_path = None;
+            }
+            if let Ok(path) = audio_rename::move_to_unique(&staged, &dir, &source_title, "m4a") {
+                task.output_path = Some(path.to_string_lossy().into_owned());
+                task.staged_path = None;
+                task.recognition_error = Some(format!("{}；已使用原始 M4A 文件兜底", e));
+            }
+        }
+    }
+    emit_audio_postprocess(app, task, "rename", 1.0);
 }
 
 /// 输入目标类型
@@ -447,9 +934,7 @@ fn identify(input: &str) -> Target {
         // —— 合集 / 系列页（space.bilibili.com）优先识别 ——
         // 支持 query 形式（?sid=..&mid=..）与路径形式
         // （/channel/collection/detail/{sid} 或 /channel/series/detail/{sid}）
-        if let Some(sid) = extract_query(s, "sid")
-            .or_else(|| extract_path_token(s, "detail"))
-        {
+        if let Some(sid) = extract_query(s, "sid").or_else(|| extract_path_token(s, "detail")) {
             let mid = extract_query(s, "mid")
                 .or_else(|| extract_mid_from_space(s))
                 .unwrap_or_default();
@@ -458,14 +943,14 @@ fn identify(input: &str) -> Target {
             }
         }
 
-        if let Some(ssid) = extract_query(s, "ssid").or_else(|| {
-            extract_path_token(s, "ss").or_else(|| extract_prefixed_token(s, "ss"))
-        }) {
+        if let Some(ssid) = extract_query(s, "ssid")
+            .or_else(|| extract_path_token(s, "ss").or_else(|| extract_prefixed_token(s, "ss")))
+        {
             return Target::Season(ssid);
         }
-        if let Some(ep) = extract_query(s, "ep_id").or_else(|| {
-            extract_path_token(s, "ep").or_else(|| extract_prefixed_token(s, "ep"))
-        }) {
+        if let Some(ep) = extract_query(s, "ep_id")
+            .or_else(|| extract_path_token(s, "ep").or_else(|| extract_prefixed_token(s, "ep")))
+        {
             // ep 也需要 season 信息，但 resolve_season 仅接受 ssid；
             // 简化：ep 直接当作 ss 不可用，这里回退用 bvid 解析
             if let Some(bvid) = extract_query(s, "bvid") {
@@ -526,9 +1011,7 @@ fn extract_prefixed_token(url: &str, prefix: &str) -> Option<String> {
     let pat = format!("/{}", prefix);
     let pos = url.find(&pat)?;
     let after = &url[pos + pat.len()..];
-    let end = after
-        .find(['/', '?', '#', '&'])
-        .unwrap_or(after.len());
+    let end = after.find(['/', '?', '#', '&']).unwrap_or(after.len());
     let tok = &after[..end];
     if !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit()) {
         Some(tok.to_string())
@@ -542,9 +1025,7 @@ fn extract_query(url: &str, key: &str) -> Option<String> {
     let marker = format!("{}=", key);
     let idx = url.find(&marker)?;
     let after = &url[idx + marker.len()..];
-    let end = after
-        .find(['&', '#', '/'])
-        .unwrap_or(after.len());
+    let end = after.find(['&', '#', '/']).unwrap_or(after.len());
     let v = &after[..end];
     if v.is_empty() {
         None
@@ -557,9 +1038,7 @@ fn extract_query(url: &str, key: &str) -> Option<String> {
 fn extract_bvid_from_url(url: &str) -> Option<String> {
     let idx = url.find("BV")?;
     let after = &url[idx..];
-    let end = after
-        .find(['/', '?', '#', '&'])
-        .unwrap_or(after.len());
+    let end = after.find(['/', '?', '#', '&']).unwrap_or(after.len());
     let cand = &after[..end];
     if cand.len() > 2 {
         Some(cand.to_string())
@@ -604,9 +1083,20 @@ pub async fn bili_start_download(
     app: AppHandle,
     state: State<'_, BiliState>,
 ) -> Result<Vec<String>, String> {
-    let tasks = state.snapshot_tasks();
+    let mut tasks = state.snapshot_tasks();
     if tasks.is_empty() {
         return Err("没有可下载的任务，请先调用 bili_resolve".to_string());
+    }
+    // 仅下载前端勾选的任务（task_ids 指定）；为 None 时下载全部
+    if let Some(ids) = &input.task_ids {
+        if ids.is_empty() {
+            return Err("未勾选任何任务".to_string());
+        }
+        let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+        tasks.retain(|t| id_set.contains(&t.id));
+        if tasks.is_empty() {
+            return Err("未勾选任何任务".to_string());
+        }
     }
     // 下载并发度：用户显式指定优先；否则走统一入口（默认 3，受 BILI_CONCURRENCY 覆盖）
     let concurrency = input
@@ -614,13 +1104,42 @@ pub async fn bili_start_download(
         .unwrap_or_else(|| video::resolve_concurrency(3))
         .max(1);
     let client = Arc::new(crate::http_client::client::HttpClient::new());
+    let rename_config = AutoRenameConfig {
+        enabled: input.auto_rename.unwrap_or(true),
+        confidence_threshold: input.confidence_threshold.unwrap_or(70.0).clamp(0.0, 100.0),
+        ..AutoRenameConfig::default()
+    };
+    let quality_enabled = input.python_ai_enhancement_enabled.unwrap_or(false);
+    let quality_model_id = input
+        .python_ai_model_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or("audiosr-basic")
+        .to_string();
+    let (default_chunk_seconds, default_overlap_seconds) = if quality_model_id == "audiosr-basic" {
+        (10.24, 1.28)
+    } else {
+        (20.0, 2.0)
+    };
+    let quality_config = PythonAiEnhancementConfig {
+        enabled: quality_enabled,
+        model_id: quality_model_id,
+        device: input.python_ai_device.unwrap_or_else(|| "auto".into()),
+        chunk_seconds: input.python_ai_chunk_seconds.unwrap_or(default_chunk_seconds),
+        overlap_seconds: input.python_ai_overlap_seconds.unwrap_or(default_overlap_seconds),
+    };
+    validate_python_ai_config(&quality_config)?;
+    // fpcalc 缺失不阻断下载，后处理会转为 MP3，并保留可读错误状态。
+    let fpcalc_path = crate::commands::fpcalc_path(&app).ok();
 
     // 每次启动下载前重置控制句柄（清空上一次的暂停/停止信号）
     let control = state.reset_download_control();
 
     let app_for_cb = app.clone();
-    let prog_cb: Option<Arc<dyn Fn(&DownloadTask, crate::http_client::types::Progress) + Send + Sync>> =
-        Some(Arc::new(move |task: &DownloadTask, p: crate::http_client::types::Progress| {
+    let prog_cb: Option<
+        Arc<dyn Fn(&DownloadTask, crate::http_client::types::Progress) + Send + Sync>,
+    > = Some(Arc::new(
+        move |task: &DownloadTask, p: crate::http_client::types::Progress| {
             // 通过 AppHandle 取共享状态（AppHandle 为 'static，闭包内安全）
             let st = app_for_cb.state::<BiliState>();
             st.apply_results(std::slice::from_ref(task));
@@ -636,9 +1155,21 @@ pub async fn bili_start_download(
                 total: p.total.unwrap_or(0),
                 speed: p.speed,
                 error: task.error.clone(),
+                source_title: if task.source_title.is_empty() {
+                    task.title.clone()
+                } else {
+                    task.source_title.clone()
+                },
+                output_path: task.output_path.clone(),
+                confidence: task.recognition_result.as_ref().map(|r| r.confidence),
+                quality_status: Some(format!("{:?}", task.quality_status)),
+                quality_model_id: task.quality_model_id.clone(),
+                quality_output_path: task.quality_output_path.clone(),
+                quality_error: task.quality_error.clone(),
             };
             let _ = app_for_cb.emit("download-progress", payload);
-        }));
+        },
+    ));
 
     let mut tasks_ref = tasks.clone();
     // 若下载命令显式指定了目录，覆盖各任务的输出目录（优先于解析时设定的值）
@@ -649,21 +1180,104 @@ pub async fn bili_start_download(
     }
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        let results = crate::biliapi::task::run_batch(client, &mut tasks_ref, concurrency, prog_cb, Some(&control)).await;
-        let failed: Vec<_> = results.iter().enumerate().filter(|(_, r)| r.is_err()).collect();
+        let results = crate::biliapi::task::run_batch(
+            client,
+            &mut tasks_ref,
+            concurrency,
+            prog_cb,
+            Some(&control),
+        )
+        .await;
+        for task in tasks_ref.iter_mut() {
+            if task.mode == DownloadMode::AudioOnly {
+                task.quality_status = if quality_config.enabled {
+                    QualityStatus::Pending
+                } else {
+                    QualityStatus::Disabled
+                };
+                task.quality_model_id = quality_config
+                    .enabled
+                    .then(|| quality_config.model_id.clone());
+                task.quality_output_path = None;
+                task.quality_error = None;
+            }
+            postprocess_audio_task(
+                &app2,
+                task,
+                fpcalc_path.as_deref(),
+                &rename_config,
+                &quality_config,
+            )
+            .await;
+            app2.state::<BiliState>()
+                .apply_results(std::slice::from_ref(task));
+        }
+        let failed: Vec<_> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.is_err())
+            .collect();
+        let renamed = tasks_ref
+            .iter()
+            .filter(|t| t.recognition_status == RecognitionStatus::Renamed)
+            .count();
+        let fallback = tasks_ref
+            .iter()
+            .filter(|t| {
+                t.mode == DownloadMode::AudioOnly && {
+                    matches!(
+                        t.recognition_status,
+                        RecognitionStatus::Disabled
+                            | RecognitionStatus::NoMatch
+                            | RecognitionStatus::BelowThreshold
+                            | RecognitionStatus::Failed
+                            | RecognitionStatus::RenameFailed
+                    )
+                }
+            })
+            .count();
+        let recognize_failed = tasks_ref
+            .iter()
+            .filter(|t| {
+                t.mode == DownloadMode::AudioOnly && {
+                    matches!(
+                        t.recognition_status,
+                        RecognitionStatus::NoMatch
+                            | RecognitionStatus::BelowThreshold
+                            | RecognitionStatus::Failed
+                            | RecognitionStatus::RenameFailed
+                    )
+                }
+            })
+            .count();
+        let enhanced = tasks_ref
+            .iter()
+            .filter(|t| t.quality_status == QualityStatus::Completed)
+            .count();
+        let enhance_failed = tasks_ref
+            .iter()
+            .filter(|t| t.quality_status == QualityStatus::Failed)
+            .count();
 
         // 下载完成后写入通用历史库（每条任务一条，含最终状态/错误）
         let hist_dir = crate::commands::history_dir(&app2);
         if let Ok(conn) = crate::history::open_db(&hist_dir) {
             for t in tasks_ref.iter() {
-                let subtitle = format!("{} · {}", mode_label(t.mode), status_label(t.status));
+                let subtitle = format!(
+                    "{} · {} · {}",
+                    mode_label(t.mode),
+                    status_label(t.status),
+                    recognition_label(t.recognition_status)
+                );
                 let payload = serde_json::to_string(t).unwrap_or_default();
+                let file_path = t.output_file().to_string_lossy().to_string();
                 if let Err(e) = crate::history::insert(
                     &conn,
                     crate::history::HistoryKind::Download,
                     &t.title,
                     &subtitle,
                     &payload,
+                    &file_path,
                 ) {
                     eprintln!("[history] 写入下载历史失败: {e}");
                 }
@@ -672,7 +1286,15 @@ pub async fn bili_start_download(
 
         let _ = app2.emit(
             "download-finished",
-            serde_json::json!({ "ok": failed.is_empty(), "failed": failed.len() }),
+            serde_json::json!({
+                "ok": failed.is_empty(),
+                "failed": failed.len(),
+                "renamed": renamed,
+                "recognize_failed": recognize_failed,
+                "fallback": fallback,
+                "enhanced": enhanced,
+                "enhance_failed": enhance_failed
+            }),
         );
     });
 
@@ -732,8 +1354,13 @@ fn urlencoding(s: &str) -> String {
 
 /// 轮询登录二维码状态；成功则自动持久化 SESSDATA
 #[tauri::command]
-pub async fn bili_login_poll(qr_key: String, state: State<'_, BiliState>) -> Result<LoginState, String> {
-    let (status, sessdata) = login::get_qr_status(&qr_key).await.map_err(|e| e.to_string())?;
+pub async fn bili_login_poll(
+    qr_key: String,
+    state: State<'_, BiliState>,
+) -> Result<LoginState, String> {
+    let (status, sessdata) = login::get_qr_status(&qr_key)
+        .await
+        .map_err(|e| e.to_string())?;
     if status.code == crate::biliapi::types::QR_SUCCESS {
         login::persist_login(state.config_dir_opt().as_deref(), sessdata.as_deref());
         Ok(LoginState {
@@ -759,9 +1386,7 @@ pub async fn bili_check_login(state: State<'_, BiliState>) -> Result<bool, Strin
 
 /// 获取已登录用户的 B 站资料（昵称 + 头像）。未登录时返回 `None`。
 #[tauri::command]
-pub async fn bili_user_info(
-    state: State<'_, BiliState>,
-) -> Result<Option<BiliUserInfo>, String> {
+pub async fn bili_user_info(state: State<'_, BiliState>) -> Result<Option<BiliUserInfo>, String> {
     // 先按标准流程校验登录态（失效会被清除）。
     let sessdata = match login::load_and_check(state.config_dir_opt().as_deref())
         .await
@@ -775,7 +1400,9 @@ pub async fn bili_user_info(
             _ => return Ok(None),
         },
     };
-    let info = login::fetch_user_info(&sessdata).await.map_err(|e| e.to_string())?;
+    let info = login::fetch_user_info(&sessdata)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(Some(BiliUserInfo {
         name: info.name,
         face: info.face,
@@ -818,13 +1445,172 @@ fn mode_label(m: crate::biliapi::task::DownloadMode) -> String {
     .to_string()
 }
 
+/// 将识别状态转为历史记录中的可读标签。
+fn recognition_label(s: RecognitionStatus) -> &'static str {
+    match s {
+        RecognitionStatus::Disabled => "未启用识别",
+        RecognitionStatus::Pending => "等待识别",
+        RecognitionStatus::Recognizing => "识别中",
+        RecognitionStatus::Renamed => "已重命名",
+        RecognitionStatus::NoMatch => "未匹配",
+        RecognitionStatus::BelowThreshold => "置信度不足",
+        RecognitionStatus::Failed => "识别失败",
+        RecognitionStatus::RenameFailed => "重命名失败",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn python_ai_config_defaults_to_disabled_audio_sr_settings() {
+        let config = PythonAiEnhancementConfig {
+            enabled: false,
+            model_id: "audiosr-basic".into(),
+            device: "auto".into(),
+            chunk_seconds: 10.24,
+            overlap_seconds: 1.28,
+        };
+        assert!(!config.enabled);
+        assert!(validate_python_ai_config(&config).is_ok());
+    }
+
+    #[test]
+    fn audio_postprocess_plan_disables_both_optional_stages() {
+        assert_eq!(
+            audio_postprocess_plan(false, false),
+            vec![AudioPostprocessStage::Encode]
+        );
+    }
+
+    #[test]
+    fn audio_postprocess_plan_runs_only_recognition_when_ai_is_disabled() {
+        assert_eq!(
+            audio_postprocess_plan(true, false),
+            vec![AudioPostprocessStage::Recognize, AudioPostprocessStage::Encode]
+        );
+    }
+
+    #[test]
+    fn audio_postprocess_plan_runs_only_ai_when_recognition_is_disabled() {
+        assert_eq!(
+            audio_postprocess_plan(false, true),
+            vec![AudioPostprocessStage::Enhance, AudioPostprocessStage::Encode]
+        );
+    }
+
+    #[test]
+    fn audio_postprocess_plan_runs_recognition_before_ai() {
+        assert_eq!(
+            audio_postprocess_plan(true, true),
+            vec![
+                AudioPostprocessStage::Recognize,
+                AudioPostprocessStage::Enhance,
+                AudioPostprocessStage::Encode
+            ]
+        );
+    }
+
+    #[test]
+    fn python_ai_config_rejects_invalid_device_and_overlap() {
+        let invalid_device = PythonAiEnhancementConfig {
+            enabled: true,
+            model_id: "audiosr-basic".into(),
+            device: "metal".into(),
+            chunk_seconds: 10.24,
+            overlap_seconds: 1.28,
+        };
+        assert!(validate_python_ai_config(&invalid_device).is_err());
+
+        let invalid_overlap = PythonAiEnhancementConfig {
+            device: "cpu".into(),
+            overlap_seconds: 10.24,
+            ..invalid_device
+        };
+        assert!(validate_python_ai_config(&invalid_overlap).is_err());
+    }
+
+    #[test]
+    fn quality_output_path_is_flac_and_is_hidden_from_final_outputs() {
+        let task = DownloadTask {
+            id: "BV1abc#1".into(),
+            title: "source".into(),
+            source_title: "source".into(),
+            video_url: None,
+            audio_url: Some("audio".into()),
+            mode: DownloadMode::AudioOnly,
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            status: crate::biliapi::task::DownloadStatus::Completed,
+            error: None,
+            recognition_status: RecognitionStatus::Disabled,
+            recognition_result: None,
+            recognition_error: None,
+            quality_status: QualityStatus::Pending,
+            quality_model_id: Some("audiosr-basic".into()),
+            quality_output_path: None,
+            quality_error: None,
+            staged_path: None,
+            output_path: None,
+            group: None,
+            cover: None,
+        };
+        let output = quality_output_path(&task);
+        assert_eq!(output.extension().and_then(|value| value.to_str()), Some("flac"));
+        assert!(output
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.starts_with(".audio-processor-")));
+    }
+
+    fn audio_probe(codec_name: &str, sample_rate: u32, channels: u16, duration: f64) -> media::AudioProbe {
+        media::AudioProbe {
+            codec_name: codec_name.into(),
+            sample_rate,
+            channels,
+            duration_seconds: duration,
+        }
+    }
+
+    fn ai_worker_result(sample_rate: u32, channels: u16, duration: f64) -> ai_worker::WorkerResult {
+        ai_worker::WorkerResult {
+            output_path: "master.flac".into(),
+            model_id: "audiosr-basic".into(),
+            model_version: "test".into(),
+            sample_rate,
+            channels,
+            duration_seconds: duration,
+            peak_db: -6.0,
+        }
+    }
+
+    #[test]
+    fn ai_master_validation_accepts_matching_flac() {
+        let input = audio_probe("aac", 44_100, 2, 10.24);
+        let output = audio_probe("flac", 48_000, 2, 10.25);
+        let result = ai_worker_result(48_000, 2, 10.24);
+        assert!(validate_ai_master_output(&input, &output, &result).is_ok());
+    }
+
+    #[test]
+    fn ai_master_validation_rejects_invalid_output_parameters() {
+        let input = audio_probe("aac", 44_100, 2, 10.24);
+        let result = ai_worker_result(48_000, 2, 10.24);
+        for output in [
+            audio_probe("wav", 48_000, 2, 10.24),
+            audio_probe("flac", 44_100, 2, 10.24),
+            audio_probe("flac", 48_000, 1, 10.24),
+            audio_probe("flac", 48_000, 2, 9.0),
+        ] {
+            assert!(validate_ai_master_output(&input, &output, &result).is_err());
+        }
+    }
+
+    #[test]
     fn test_identify_collection_query() {
-        let t = identify("https://space.bilibili.com/123456/channel/collection/detail?sid=789&mid=123456");
+        let t = identify(
+            "https://space.bilibili.com/123456/channel/collection/detail?sid=789&mid=123456",
+        );
         match t {
             Target::Collection(mid, sid) => {
                 assert_eq!(mid, "123456");

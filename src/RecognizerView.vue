@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onActivated, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -15,10 +15,32 @@ interface SongInfo {
   confidence: number;
 }
 
+interface HistoryItem {
+  id: number;
+  payload: string;
+}
+
 const filePath = ref("");
 const result = ref<SongInfo | null>(null);
 const message = ref("");
 const identifying = ref(false);
+
+// 与后端同步：识别为同步阻塞调用（无后台任务队列），后端唯一权威数据即历史库。
+// 重新可见时拉取最近一条识别记录回填；若用户已手动选择文件则保留本地结果不被覆盖。
+async function syncFromHistory() {
+  if (identifying.value || filePath.value) return;
+  try {
+    const rows = await invoke<HistoryItem[]>("get_history", {
+      kind: "recognize",
+      limit: 1,
+    });
+    result.value = rows.length > 0 ? (JSON.parse(rows[0].payload) as SongInfo) : null;
+  } catch {
+    // 同步失败不打断本地展示
+  }
+}
+
+onActivated(syncFromHistory);
 
 async function pickFile() {
   try {

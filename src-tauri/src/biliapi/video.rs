@@ -292,6 +292,8 @@ pub struct ResolveResult {
     pub bvid: String,
     pub title: String,
     pub pages: Vec<PageStream>,
+    /// 视频封面 URL（用于前端展示），无则空串
+    pub cover: String,
 }
 
 /// 解析单个视频（多 P 遍历 + 清晰度降级）
@@ -336,6 +338,7 @@ pub async fn resolve_video(
         bvid: info.bvid,
         title: info.title,
         pages,
+        cover: info.pic.clone(),
     })
 }
 
@@ -444,6 +447,7 @@ pub async fn resolve_season(
         let ep_cid = ep.cid;
         let ep_title = ep.title.clone();
         let ep_long = ep.long_title.clone();
+        let ep_cover = ep.cover.clone();
         handles.push(tokio::spawn(async move {
             let title = ep_title.clone();
             let res = resolve_episode(
@@ -453,6 +457,7 @@ pub async fn resolve_season(
                 prefer,
                 &ep_title,
                 &ep_long,
+                &ep_cover,
             )
             .await;
             drop(permit);
@@ -484,6 +489,7 @@ async fn resolve_episode(
     prefer: types::MediaFormat,
     ep_title: &str,
     ep_long: &str,
+    ep_cover: &str,
 ) -> Result<ResolveResult> {
     let mut actual = prefer;
     let mut selection = None;
@@ -516,6 +522,7 @@ async fn resolve_episode(
             audio_url: sel.audio_url,
             actual_format: actual.0,
         }],
+        cover: ep_cover.to_string(),
     })
 }
 
@@ -561,6 +568,7 @@ mod tests {
                     actual_format: 64,
                 },
             ],
+            cover: String::new(),
         };
         assert_eq!(r.pages.len(), 2);
         // 第二分 P 视频直链缺失（清晰度降级后仍无视频流），但音频仍在

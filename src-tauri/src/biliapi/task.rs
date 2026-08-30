@@ -8,6 +8,7 @@
 //! - `VideoOnly`：仅下载视频
 //! - `Merge`：下载音 + 视频后用 `media` 模块调用 ffmpeg 合并为 mp4
 
+use crate::audio_rename;
 use crate::biliapi::error::BiliApiError;
 use crate::biliapi::media;
 use crate::biliapi::video::{PageStream, ResolveResult};
@@ -42,6 +43,43 @@ pub enum DownloadStatus {
     Cancelled,
 }
 
+/// 音频识别和自动重命名状态，与下载传输状态独立维护。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecognitionStatus {
+    Disabled,
+    Pending,
+    Recognizing,
+    Renamed,
+    NoMatch,
+    BelowThreshold,
+    Failed,
+    RenameFailed,
+}
+
+impl Default for RecognitionStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+/// Python AI 增强状态，与下载传输及音频识别状态分别维护。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QualityStatus {
+    Disabled,
+    Pending,
+    CheckingRuntime,
+    LoadingModel,
+    Enhancing,
+    Completed,
+    Failed,
+}
+
+impl Default for QualityStatus {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
 /// 下载控制句柄：通过 `Arc<AtomicBool>` 信号实现暂停 / 停止。
 ///
 /// - `pause` 置位：当前任务下载完成后进入 `Paused`，保留已下载文件，可续传。
@@ -68,6 +106,9 @@ pub struct DownloadTask {
     pub id: String,
     /// 展示标题（文件命名用）
     pub title: String,
+    /// B 站原始标题，自动重命名后仍保留，用于兜底和问题排查。
+    #[serde(default)]
+    pub source_title: String,
     /// 视频直链（AudioOnly 模式下可为 None）
     pub video_url: Option<String>,
     /// 音频直链（VideoOnly 模式下可为 None）
@@ -80,9 +121,39 @@ pub struct DownloadTask {
     pub status: DownloadStatus,
     /// 失败原因（status == Failed 时）
     pub error: Option<String>,
+    /// 音频识别/重命名状态。
+    #[serde(default)]
+    pub recognition_status: RecognitionStatus,
+    /// 识别结果（仅自动识别成功或得到匹配时存在）。
+    #[serde(default)]
+    pub recognition_result: Option<crate::recognizer::SongInfo>,
+    /// 识别或重命名错误，不覆盖下载错误。
+    #[serde(default)]
+    pub recognition_error: Option<String>,
+    /// Python AI 增强状态，不覆盖下载或识别状态。
+    #[serde(default)]
+    pub quality_status: QualityStatus,
+    /// 本次 AI 增强实际使用的模型 ID。
+    #[serde(default)]
+    pub quality_model_id: Option<String>,
+    /// AI 增强生成的无损中间文件路径。
+    #[serde(default)]
+    pub quality_output_path: Option<String>,
+    /// AI 增强失败原因，不覆盖下载或识别错误。
+    #[serde(default)]
+    pub quality_error: Option<String>,
+    /// 下载过程中的稳定临时文件路径。
+    #[serde(default)]
+    pub staged_path: Option<String>,
+    /// 实际最终落盘路径。
+    #[serde(default)]
+    pub output_path: Option<String>,
     /// 所属分组（合集/系列）；非合集任务为 None
     #[serde(default)]
     pub group: Option<TaskGroup>,
+    /// 视频封面 URL（用于前端展示），无则 None
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 impl DownloadTask {
@@ -110,16 +181,36 @@ impl DownloadTask {
             // （如 "v3"）或默认等于标题，不应覆盖真实标题。
             res.title.clone()
         };
+        let cover = if res.cover.is_empty() {
+            None
+        } else {
+            Some(res.cover.clone())
+        };
         DownloadTask {
             id,
-            title,
+            title: title.clone(),
+            source_title: title,
             video_url: page.video_url.clone(),
             audio_url: page.audio_url.clone(),
             mode,
             output_dir: output_dir.to_string(),
             status: DownloadStatus::Pending,
             error: None,
+            recognition_status: if mode == DownloadMode::AudioOnly {
+                RecognitionStatus::Pending
+            } else {
+                RecognitionStatus::Disabled
+            },
+            recognition_result: None,
+            recognition_error: None,
+            quality_status: QualityStatus::Disabled,
+            quality_model_id: None,
+            quality_output_path: None,
+            quality_error: None,
+            staged_path: None,
+            output_path: None,
             group,
+            cover,
         }
     }
 
@@ -153,7 +244,16 @@ impl DownloadTask {
 fn sanitize(name: &str) -> String {
     let mut s = String::new();
     for c in name.chars() {
-        if c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' {
+        if c == '\\'
+            || c == '/'
+            || c == ':'
+            || c == '*'
+            || c == '?'
+            || c == '"'
+            || c == '<'
+            || c == '>'
+            || c == '|'
+        {
             s.push('_');
         } else {
             s.push(c);
@@ -162,12 +262,40 @@ fn sanitize(name: &str) -> String {
     s.trim().to_string()
 }
 
+impl DownloadTask {
+    /// 返回本任务的稳定临时文件路径，用于断点续传和下载后识别。
+    pub fn staged_file(&self) -> std::path::PathBuf {
+        self.staged_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                audio_rename::staging_path(Path::new(&self.output_dir), &self.id, "m4a")
+            })
+    }
+
+    /// 推算本任务最终落盘的绝对路径（与 `run_task` 内命名规则保持一致）。
+    /// - AudioOnly → `<dir>/<title>.mp3`
+    /// - VideoOnly / Merge → `<dir>/<title>.mp4`
+    pub fn output_file(&self) -> std::path::PathBuf {
+        if let Some(path) = &self.output_path {
+            return std::path::PathBuf::from(path);
+        }
+        let dir = Path::new(&self.output_dir);
+        let base = sanitize(&self.title);
+        let ext = match self.mode {
+            DownloadMode::AudioOnly => "mp3",
+            DownloadMode::VideoOnly | DownloadMode::Merge => "mp4",
+        };
+        dir.join(format!("{}.{}", base, ext))
+    }
+}
+
 /// ffmpeg 的探测与合并逻辑已迁移至 [`crate::biliapi::media`] 模块。
 /// 本模块仅保留下载编排，通过 `media::ffmpeg_available` / `media::merge` 调用。
 
 /// 执行单个下载任务
 ///
-/// - `AudioOnly`：下音频 → `<title>.m4a`
+/// - `AudioOnly`：下音频到稳定 `.m4a.part`，完成后的 MP3 由命令层后处理
 /// - `VideoOnly`：下视频 → `<title>.mp4`
 /// - `Merge`：下音 + 视频 → ffmpeg 合并 `<title>.mp4`；若 ffmpeg 不可用则回退为仅下载音/视频并标记提示
 ///
@@ -188,8 +316,9 @@ pub async fn run_task(
 
     // 进度回调闭包：用 task 快照（Send）包裹，满足 download_to_file 的 Arc<dyn Fn+Send+Sync> 要求
     let snapshot = task.clone();
-    let prog_cb: Option<Arc<dyn Fn(DlProgress) + Send + Sync>> = on_progress
-        .map(|f| Arc::new(move |p: DlProgress| f(&snapshot, p)) as Arc<dyn Fn(DlProgress) + Send + Sync>);
+    let prog_cb: Option<Arc<dyn Fn(DlProgress) + Send + Sync>> = on_progress.map(|f| {
+        Arc::new(move |p: DlProgress| f(&snapshot, p)) as Arc<dyn Fn(DlProgress) + Send + Sync>
+    });
 
     // 停止信号：优先于暂停，立即中断并删除已下载部分
     let stop = control.map(|c| c.stop.clone());
@@ -206,7 +335,8 @@ pub async fn run_task(
                     return Err(BiliApiError::Other(task.error.clone().unwrap()));
                 }
             };
-            let out = dir.join(format!("{}.m4a", base));
+            let out = task.staged_file();
+            task.staged_path = Some(out.to_string_lossy().into_owned());
             match client
                 .download_to_file(
                     audio,
@@ -293,14 +423,11 @@ pub async fn run_task(
                     return Err(BiliApiError::Other(task.error.clone().unwrap()));
                 }
             };
-            let audio = task
-                .audio_url
-                .clone()
-                .ok_or_else(|| {
-                    task.status = DownloadStatus::Failed;
-                    task.error = Some("Merge 模式需音频直链".into());
-                    BiliApiError::Other(task.error.clone().unwrap())
-                })?;
+            let audio = task.audio_url.clone().ok_or_else(|| {
+                task.status = DownloadStatus::Failed;
+                task.error = Some("Merge 模式需音频直链".into());
+                BiliApiError::Other(task.error.clone().unwrap())
+            })?;
             if !media::ffmpeg_available() {
                 // 回退：仅下载音 + 视频，提示用户手动合并
                 println!("[task] ffmpeg 不可用 -> 走回退分支（分别下载音/视频）");
@@ -336,7 +463,13 @@ pub async fn run_task(
                     }
                 }
                 match client
-                    .download_to_file(&audio, aout.to_str().unwrap(), None, stop.clone(), pause.clone())
+                    .download_to_file(
+                        &audio,
+                        aout.to_str().unwrap(),
+                        None,
+                        stop.clone(),
+                        pause.clone(),
+                    )
                     .await
                 {
                     Ok(()) => {}
@@ -396,7 +529,13 @@ pub async fn run_task(
                 }
             }
             match client
-                .download_to_file(&audio, atmp.to_str().unwrap(), None, stop.clone(), pause.clone())
+                .download_to_file(
+                    &audio,
+                    atmp.to_str().unwrap(),
+                    None,
+                    stop.clone(),
+                    pause.clone(),
+                )
                 .await
             {
                 Ok(()) => {}
@@ -515,18 +654,28 @@ mod tests {
             bvid: "BV1xx".into(),
             title: "测试视频".into(),
             pages,
+            cover: String::new(),
         }
     }
 
     #[test]
     fn test_from_page_mode_and_title() {
         let res = resolve_result(vec![page_stream(Some("v"), Some("a"))]);
-        let task = DownloadTask::from_page(&res, &res.pages[0], DownloadMode::Merge, "/tmp", None, false);
+        let task = DownloadTask::from_page(
+            &res,
+            &res.pages[0],
+            DownloadMode::Merge,
+            "/tmp",
+            None,
+            false,
+        );
         assert_eq!(task.id, "BV1xx#1");
         assert_eq!(task.mode, DownloadMode::Merge);
         assert_eq!(task.video_url.as_deref(), Some("v"));
         assert_eq!(task.audio_url.as_deref(), Some("a"));
         assert_eq!(task.status, DownloadStatus::Pending);
+        assert_eq!(task.quality_status, QualityStatus::Disabled);
+        assert!(task.quality_output_path.is_none());
     }
 
     #[test]
@@ -566,9 +715,13 @@ mod tests {
                 audio_url: Some("a".into()),
                 actual_format: 80,
             }],
+            cover: String::new(),
         };
         let tasks = DownloadTask::from_resolves(&[res], DownloadMode::AudioOnly, "/tmp", None);
-        assert_eq!(tasks[0].title, "伊利亚的赌注：马斯克曾嘲讽的GPT路线【硅基诗篇5】");
+        assert_eq!(
+            tasks[0].title,
+            "伊利亚的赌注：马斯克曾嘲讽的GPT路线【硅基诗篇5】"
+        );
     }
 
     #[test]

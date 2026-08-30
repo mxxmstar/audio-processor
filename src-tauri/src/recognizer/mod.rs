@@ -10,10 +10,10 @@
 //! Tauri 命令层（`crate::commands`）仅负责把前端调用桥接到这里。
 
 // 子模块声明
-pub mod acoustid;     // AcoustID 指纹查询
-pub mod error;        // 统一错误类型
-pub mod fingerprint;  // 音频解码 + Chromaprint 指纹生成
-pub mod musicbrainz;  // MusicBrainz 曲目详情查询
+pub mod acoustid; // AcoustID 指纹查询
+pub mod error; // 统一错误类型
+pub mod fingerprint; // 音频解码 + Chromaprint 指纹生成
+pub mod musicbrainz; // MusicBrainz 曲目详情查询
 
 // 重导出常用类型，方便命令层直接 `use crate::recognizer::*` 取到
 pub use error::{AppError, Result};
@@ -23,13 +23,13 @@ use serde::Serialize;
 
 /// 返回给前端（GUI）的歌曲信息结构。
 /// 使用 `serde::Serialize` 以便 Tauri 能把它序列化为 JSON 传给前端。
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct SongInfo {
-    pub title: String,            // 标题
-    pub artist: String,           // 艺术家
-    pub album: Option<String>,    // 专辑（可能为空）
+    pub title: String,              // 标题
+    pub artist: String,             // 艺术家
+    pub album: Option<String>,      // 专辑（可能为空）
     pub album_date: Option<String>, // 专辑发行日期（可能为空）
-    pub confidence: f64,          // 识别置信度（百分比，如 100.0）
+    pub confidence: f64,            // 识别置信度（百分比，如 100.0）
 }
 
 /// 音频识别流程入口（不依赖 Tauri 上下文，供命令层与测试/示例共用）。

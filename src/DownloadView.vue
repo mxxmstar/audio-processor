@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -11,6 +11,23 @@ import {
 import type { MenuProps } from "ant-design-vue";
 
 type TaskStatus = "Pending" | "Downloading" | "Completed" | "Failed" | "Paused" | "Cancelled";
+type RecognitionStatus =
+  | "Disabled"
+  | "Pending"
+  | "Recognizing"
+  | "Renamed"
+  | "NoMatch"
+  | "BelowThreshold"
+  | "Failed"
+  | "RenameFailed";
+type QualityStatus =
+  | "Disabled"
+  | "Pending"
+  | "CheckingRuntime"
+  | "LoadingModel"
+  | "Enhancing"
+  | "Completed"
+  | "Failed";
 
 interface TaskGroup {
   id: string;
@@ -27,11 +44,27 @@ interface Task {
   out_path: string;
   status: TaskStatus;
   error: string | null;
+  source_title?: string;
+  recognition_status?: RecognitionStatus;
+  recognition_result?: {
+    title: string;
+    artist: string;
+    album: string | null;
+    album_date: string | null;
+    confidence: number;
+  } | null;
+  recognition_error?: string | null;
+  quality_status?: QualityStatus;
+  quality_model_id?: string | null;
+  quality_output_path?: string | null;
+  quality_error?: string | null;
+  output_path?: string | null;
   group: TaskGroup | null;
+  cover: string | null;
 }
 
 interface ProgressEvent {
-  phase: string; // "resolve" | "download"
+  phase: string; // "resolve" | "download" | "recognize" | "rename" | "enhance"
   task_id: string;
   title: string;
   status: string;
@@ -40,6 +73,13 @@ interface ProgressEvent {
   total: number;
   speed: number;
   error: string | null;
+  source_title: string;
+  output_path: string | null;
+  confidence: number | null;
+  quality_status?: QualityStatus;
+  quality_model_id?: string | null;
+  quality_output_path?: string | null;
+  quality_error?: string | null;
 }
 
 interface ResolveFinished {
@@ -57,12 +97,19 @@ const inputUrl = ref("");
 const preferFormat = ref("1080P");
 const mode = ref<"audio" | "video" | "merge">("audio");
 const outputDir = ref("");
+const autoRename = ref(true);
+const confidenceThreshold = ref(70);
+const pythonAiEnhancementEnabled = ref(false);
+const pythonAiModelId = ref("audiosr-basic");
 
 const tasks = ref<Task[]>([]);
 const resolving = ref(false);
 const downloading = ref(false);
 const paused = ref(false);
 const message = ref("");
+
+// 勾选状态：以任务 id 为键的集合，仅勾选的任务会被下载
+const selectedIds = ref<Set<string>>(new Set());
 
 const progressMap: Record<string, ProgressEvent> = reactive({});
 
@@ -147,6 +194,67 @@ function statusText(s: TaskStatus): string {
   }
 }
 
+function recognitionText(s?: RecognitionStatus): string {
+  switch (s) {
+    case "Recognizing": return "识别中";
+    case "Renamed": return "已重命名";
+    case "NoMatch": return "未匹配";
+    case "BelowThreshold": return "置信度不足";
+    case "Failed": return "识别失败";
+    case "RenameFailed": return "重命名失败";
+    case "Disabled": return "未启用识别";
+    default: return "等待识别";
+  }
+}
+
+function recognitionColor(s?: RecognitionStatus): string {
+  switch (s) {
+    case "Renamed": return "success";
+    case "Recognizing": return "processing";
+    case "NoMatch":
+    case "BelowThreshold": return "warning";
+    case "Failed":
+    case "RenameFailed": return "error";
+    default: return "default";
+  }
+}
+
+function qualityText(s?: QualityStatus): string {
+  switch (s) {
+    case "CheckingRuntime": return "检查 AI 运行时";
+    case "LoadingModel": return "加载 AI 模型";
+    case "Enhancing": return "AI 增强中";
+    case "Completed": return "AI 增强完成";
+    case "Failed": return "AI 增强失败";
+    case "Disabled": return "未启用 AI";
+    default: return "等待 AI 增强";
+  }
+}
+
+function qualityColor(s?: QualityStatus): string {
+  switch (s) {
+    case "Completed": return "success";
+    case "CheckingRuntime":
+    case "LoadingModel":
+    case "Enhancing": return "processing";
+    case "Failed": return "error";
+    default: return "default";
+  }
+}
+
+function downloadInput() {
+  return {
+    outputDir: outputDir.value || null,
+    concurrency: 3,
+    taskIds: Array.from(selectedIds.value),
+    autoRename: mode.value === "audio" ? autoRename.value : false,
+    confidenceThreshold: confidenceThreshold.value,
+    pythonAiEnhancementEnabled:
+      mode.value === "audio" ? pythonAiEnhancementEnabled.value : false,
+    pythonAiModelId: pythonAiModelId.value,
+  };
+}
+
 async function pickDir() {
   try {
     const sel = await open({
@@ -197,7 +305,7 @@ async function doDownload() {
   message.value = "开始下载…";
   try {
     await invoke<string[]>("bili_start_download", {
-      input: { outputDir: outputDir.value || null, concurrency: 3 },
+      input: downloadInput(),
     });
   } catch (e) {
     message.value = String(e);
@@ -213,7 +321,7 @@ async function doResume() {
   message.value = "继续下载…";
   try {
     await invoke<string[]>("bili_start_download", {
-      input: { outputDir: outputDir.value || null, concurrency: 3 },
+      input: downloadInput(),
     });
   } catch (e) {
     message.value = String(e);
@@ -243,6 +351,83 @@ async function doStop() {
   }
 }
 
+// 已勾选数量
+const selectedCount = computed(() => selectedIds.value.size);
+
+function isSelected(id: string): boolean {
+  return selectedIds.value.has(id);
+}
+
+// 全部选择：勾选当前所有任务
+function selectAll() {
+  selectedIds.value = new Set(tasks.value.map((t) => t.id));
+  rangeIds.value = new Set();
+}
+
+// 全部取消：清空勾选
+function clearSelection() {
+  selectedIds.value = new Set();
+  rangeIds.value = new Set();
+}
+
+// 解析结果写入时，默认全选（保留已有勾选状态，新增任务默认选中）
+function syncSelectionOnTasks() {
+  const s = new Set(selectedIds.value);
+  for (const t of tasks.value) s.add(t.id);
+  selectedIds.value = s;
+  rangeIds.value = new Set();
+}
+
+// 扁平化任务顺序（合集分组后的展示顺序），用于 shift 连续多选的索引定位
+const orderedTaskIds = computed<string[]>(() =>
+  groupedTasks.value.flatMap((g) => g.tasks.map((t) => t.id))
+);
+// 上一次点击的任务索引（shift 多选的锚点）
+const lastTaskIndex = ref(-1);
+// shift 框选的「蓝色临时选中」集合（尚未真正勾选，点击任意勾选框后批量应用）
+const rangeIds = ref<Set<string>>(new Set());
+
+function inRange(id: string): boolean {
+  return rangeIds.value.has(id);
+}
+
+// 任务点击交互：
+// - 普通点击 = 切换单个勾选；若当前存在蓝色框选区，则把点击的勾选状态批量应用到整个框选区后清除
+// - shift+点击 = 以锚点为起点，框选 [锚点, 当前] 区间到 rangeIds（仅高亮，不立即勾选）
+function onTaskClick(id: string, shift: boolean) {
+  const flat = orderedTaskIds.value;
+  const idx = flat.indexOf(id);
+  if (shift) {
+    if (lastTaskIndex.value < 0) lastTaskIndex.value = idx;
+    const [a, b] = idx >= lastTaskIndex.value
+      ? [lastTaskIndex.value, idx]
+      : [idx, lastTaskIndex.value];
+    const s = new Set<string>();
+    for (let i = a; i <= b; i++) s.add(flat[i]);
+    rangeIds.value = s;
+    return;
+  }
+  // 普通点击：若存在蓝色框选区，则批量应用
+  if (rangeIds.value.size > 0) {
+    const target = !isSelected(id); // 以被点击项的「新状态」为准
+    const s = new Set(selectedIds.value);
+    for (const rid of rangeIds.value) {
+      if (target) s.add(rid);
+      else s.delete(rid);
+    }
+    selectedIds.value = s;
+    rangeIds.value = new Set();
+    lastTaskIndex.value = idx;
+    return;
+  }
+  // 无任何选区：切换单个
+  const s = new Set(selectedIds.value);
+  if (s.has(id)) s.delete(id);
+  else s.add(id);
+  selectedIds.value = s;
+  lastTaskIndex.value = idx;
+}
+
 let off1: UnlistenFn | null = null;
 let off2: UnlistenFn | null = null;
 let off3: UnlistenFn | null = null;
@@ -265,22 +450,46 @@ onMounted(async () => {
       // 据此实时更新对应任务的状态展示。
       progressMap[p.task_id] = p;
       const t = tasks.value.find((x) => x.id === p.task_id);
-      if (t) t.status = p.status as TaskStatus;
+      if (t) {
+        if (p.phase === "download") t.status = p.status as TaskStatus;
+        if (p.phase === "recognize" || p.phase === "rename") {
+          t.recognition_status = p.status as RecognitionStatus;
+          t.recognition_error = p.error;
+          t.output_path = p.output_path;
+        }
+        if (p.phase === "enhance") {
+          t.quality_status = p.quality_status || (p.status as QualityStatus);
+          t.quality_model_id = p.quality_model_id;
+          t.quality_output_path = p.quality_output_path;
+          t.quality_error = p.quality_error;
+        }
+      }
+      if (p.phase === "recognize") message.value = `识别中 · ${p.title}`;
+      if (p.phase === "rename") message.value = `正在生成 MP3 · ${p.title}`;
+      if (p.phase === "enhance") message.value = `${qualityText(p.quality_status)} · ${p.title}`;
       // 仅「停止 / 失败」清除进度展示；「暂停 / 完成」保留
       // （暂停需展示断点进度，完成由 download-finished 统一清理）。
-      if (p.status === "Cancelled" || p.status === "Failed") {
+      if (p.status === "Cancelled" || (p.phase === "download" && p.status === "Failed")) {
         delete progressMap[p.task_id];
       }
     }
   });
-  off2 = await listen<{ ok: boolean; failed: number }>(
+  off2 = await listen<{
+    ok: boolean;
+    failed: number;
+    renamed: number;
+    recognize_failed: number;
+    fallback: number;
+    enhanced: number;
+    enhance_failed: number;
+  }>(
     "download-finished",
     (e) => {
       downloading.value = false;
       paused.value = false;
       message.value = e.payload.ok
-        ? "全部下载完成"
-        : `下载结束，${e.payload.failed} 个失败`;
+        ? `下载完成，${e.payload.renamed} 个已重命名${e.payload.fallback ? `，${e.payload.fallback} 个使用原始标题` : ""}${e.payload.enhanced ? `，${e.payload.enhanced} 个已完成 AI 增强` : ""}${e.payload.enhance_failed ? `，${e.payload.enhance_failed} 个 AI 增强失败` : ""}`
+        : `下载结束，${e.payload.failed} 个下载失败`;
       invoke<Task[]>("bili_list_tasks")
         .then((t) => (tasks.value = t))
         .catch(() => {});
@@ -291,10 +500,11 @@ onMounted(async () => {
     }
   );
   off3 = await listen<ResolveFinished>("resolve-finished", (e) => {
-    resolving.value = false;
-    if (e.payload.ok) {
-      tasks.value = e.payload.tasks;
-      message.value =
+  resolving.value = false;
+  if (e.payload.ok) {
+    tasks.value = e.payload.tasks;
+    syncSelectionOnTasks();
+    message.value =
         e.payload.resolved > 0
           ? `解析完成，共 ${e.payload.resolved} 个可下载项`
           : "解析完成";
@@ -315,9 +525,16 @@ onUnmounted(() => {
   off3?.();
 });
 
-onUnmounted(() => {
-  off1?.();
-  off2?.();
+// 由 keep-alive 缓存后，切换界面不会销毁组件；此处仅在重新可见时
+// 与后端任务快照做一次轻量同步，确保展示与后端状态一致。
+// 仅当本地已有任务时才同步，避免「解析失败清空后又被回填」。
+onActivated(() => {
+  if (tasks.value.length === 0) return;
+  invoke<Task[]>("bili_list_tasks")
+    .then((t) => {
+      if (t.length > 0) tasks.value = t;
+    })
+    .catch(() => {});
 });
 </script>
 
@@ -354,6 +571,28 @@ onUnmounted(() => {
                   {{ outputDir || "默认：应用配置目录" }}
                 </a-typography-text>
               </a-space>
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <a-row v-if="mode === 'audio'" :gutter="12">
+          <a-col :span="8">
+            <a-form-item label="原始音频识别并重命名">
+              <a-switch v-model:checked="autoRename" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="8" v-if="autoRename">
+            <a-form-item label="最低识别置信度">
+              <a-input-number v-model:value="confidenceThreshold" :min="0" :max="100" :precision="1" addon-after="%" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="8">
+            <a-form-item label="Python AI 音频增强">
+              <a-switch v-model:checked="pythonAiEnhancementEnabled" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="8" v-if="pythonAiEnhancementEnabled">
+            <a-form-item label="AI 模型">
+              <a-select v-model:value="pythonAiModelId" :options="[{ label: 'AudioSR 通用音乐恢复', value: 'audiosr-basic' }]" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -417,6 +656,24 @@ onUnmounted(() => {
         :message="message"
       />
 
+      <a-space
+        v-if="tasks.length"
+        class="select-bar"
+        wrap
+      >
+        <a-checkbox
+          :checked="selectedCount === tasks.length && tasks.length > 0"
+          :indeterminate="selectedCount > 0 && selectedCount < tasks.length"
+          @change="(e: any) => (e.target.checked ? selectAll() : clearSelection())"
+        >
+          全选
+        </a-checkbox>
+        <a-button size="small" @click="selectAll">全部选择</a-button>
+        <a-button size="small" @click="clearSelection">全部取消</a-button>
+        <span class="sel-count">已选 {{ selectedCount }} / {{ tasks.length }}</span>
+        <span class="sel-tip">提示：按住 Shift 点击可批量选择连续项</span>
+      </a-space>
+
       <a-card
         v-if="resolving && resolveTotal > 0"
         size="small"
@@ -458,14 +715,38 @@ onUnmounted(() => {
           >
             <template #renderItem="{ item }">
               <a-list-item>
-                <a-card size="small" :bordered="false" class="task-card">
-                  <div class="t-title">
-                    {{ item.title
-                    }}{{ item.part ? " - " + item.part : "" }}
-                  </div>
+                <div
+                  class="task-row"
+                  :class="{ 'is-selected': isSelected(item.id), 'in-range': inRange(item.id) }"
+                  @click="(e: MouseEvent) => onTaskClick(item.id, e.shiftKey)"
+                >
+                  <a-checkbox
+                    class="task-check"
+                    :checked="isSelected(item.id)"
+                    @click.stop="(e: MouseEvent) => onTaskClick(item.id, e.shiftKey)"
+                  />
+                  <img
+                    v-if="item.cover"
+                    :src="item.cover"
+                    class="task-cover"
+                    alt="cover"
+                    referrerpolicy="no-referrer"
+                  />
+                  <a-card size="small" :bordered="false" class="task-card">
+                    <div class="t-title">
+                      {{ item.title
+                      }}{{ item.part ? " - " + item.part : "" }}
+                    </div>
                   <div class="t-meta">
                     <a-tag :color="statusColor(item.status)">{{ statusText(item.status) }}</a-tag>
                     <a-tag>{{ item.mode }}</a-tag>
+                    <a-tag v-if="item.mode === 'AudioOnly' || item.mode === 'audio'" :color="recognitionColor(item.recognition_status)">
+                      {{ recognitionText(item.recognition_status) }}
+                    </a-tag>
+                    <span v-if="item.recognition_result" class="recognition-meta">
+                      {{ item.recognition_result.title }} · {{ item.recognition_result.artist }}
+                      · {{ item.recognition_result.confidence.toFixed(1) }}%
+                    </span>
                     <a-tag v-if="item.status === 'Downloading' && progressMap[item.id]" color="blue">下载中</a-tag>
                     <a-tag v-else-if="item.status === 'Paused' && progressMap[item.id]" color="gold">已暂停</a-tag>
                     <template v-if="progressMap[item.id] && (item.status === 'Downloading' || item.status === 'Paused')">
@@ -477,6 +758,11 @@ onUnmounted(() => {
                       <template v-else> · 已暂停</template>
                     </template>
                     <span v-if="item.error" class="err"> · {{ item.error }}</span>
+                    <span v-if="item.recognition_error" class="err"> · {{ item.recognition_error }}</span>
+                    <a-tag v-if="item.mode === 'AudioOnly' || item.mode === 'audio'" :color="qualityColor(item.quality_status)">
+                      {{ qualityText(item.quality_status) }}
+                    </a-tag>
+                    <span v-if="item.quality_error" class="err"> · {{ item.quality_error }}</span>
                   </div>
                   <a-progress
                     :percent="
@@ -498,6 +784,7 @@ onUnmounted(() => {
                     size="small"
                   />
                 </a-card>
+                </div>
               </a-list-item>
             </template>
           </a-list>
@@ -534,7 +821,61 @@ onUnmounted(() => {
 .task-list {
   margin-top: 1rem;
 }
+.select-bar {
+  margin: 1rem 0 0.5rem;
+}
+.sel-count {
+  font-size: 0.85rem;
+  color: #8a94a6;
+}
+.sel-tip {
+  font-size: 0.8rem;
+  color: #b0b8c4;
+}
+.task-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.8rem;
+  width: 100%;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.2rem 0.3rem;
+  transition: background 0.15s ease;
+  user-select: none;
+}
+.task-row:hover {
+  background: #f3f6fb;
+}
+.task-row.is-selected {
+  background: #e6e6e6;
+}
+.task-row.is-selected .task-card {
+  background: #e6e6e6;
+}
+/* shift 框选的蓝色临时高亮（优先于灰色，表示待批量操作） */
+.task-row.in-range {
+  background: rgba(24, 144, 255, 0.18);
+  box-shadow: inset 0 0 0 2px #1890ff;
+}
+.task-row.in-range .task-card {
+  background: transparent;
+}
+.task-check {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+.task-cover {
+  width: 96px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  align-self: center;
+  background: #eee;
+}
 .task-card {
+  flex: 1 1 auto;
   width: 100%;
   background: #fafafa;
 }
@@ -548,6 +889,9 @@ onUnmounted(() => {
 }
 .err {
   color: #c00;
+}
+.recognition-meta {
+  color: #3d5a80;
 }
 .task-collapse {
   margin-top: 1rem;

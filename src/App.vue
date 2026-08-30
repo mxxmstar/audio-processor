@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import DownloadView from "./DownloadView.vue";
 import RecognizerView from "./RecognizerView.vue";
 import HistoryView from "./HistoryView.vue";
+import Aria2View from "./Aria2View.vue";
+import QualityView from "./QualityView.vue";
+import PortCheckView from "./PortCheckView.vue";
 import {
   DownloadOutlined,
   AudioOutlined,
@@ -11,9 +14,21 @@ import {
   QrcodeOutlined,
   LogoutOutlined,
   UserOutlined,
+  CloudDownloadOutlined,
+  SoundOutlined,
+  ApiOutlined,
 } from "@ant-design/icons-vue";
 
-type ViewKey = "download" | "recognize" | "history" | "download-history";
+type ViewKey =
+  | "download"
+  | "recognize"
+  | "history"
+  | "download-history"
+  | "aria2-download"
+  | "aria2-history"
+  | "quality"
+  | "quality-history"
+  | "port-check";
 const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
 const openKeys = ref<string[]>([]);
@@ -30,6 +45,15 @@ const items = [
     ],
   },
   {
+    key: "aria2-group",
+    icon: h(CloudDownloadOutlined),
+    label: "aria2 下载",
+    children: [
+      { key: "aria2-download", icon: h(CloudDownloadOutlined), label: "下载" },
+      { key: "aria2-history", icon: h(HistoryOutlined), label: "历史记录" },
+    ],
+  },
+  {
     key: "recognize-group",
     icon: h(AudioOutlined),
     label: "音频识别",
@@ -38,11 +62,38 @@ const items = [
       { key: "history", icon: h(HistoryOutlined), label: "历史记录" },
     ],
   },
+  {
+    key: "quality-group",
+    icon: h(SoundOutlined),
+    label: "音频品质提升",
+    children: [
+      { key: "quality", icon: h(SoundOutlined), label: "音质提升" },
+      { key: "quality-history", icon: h(HistoryOutlined), label: "历史记录" },
+    ],
+  },
+  {
+    key: "port-check",
+    icon: h(ApiOutlined),
+    label: "端口占用",
+  },
+];
+
+// 可切换主视图的子项（父分组项不参与切换）
+const leafKeys: string[] = [
+  "recognize",
+  "history",
+  "download",
+  "download-history",
+  "aria2-download",
+  "aria2-history",
+  "quality",
+  "quality-history",
+  "port-check",
 ];
 
 function onMenuClick({ key }: { key: string }) {
   // 仅子项（无 children）才切换主视图
-  if (key === "recognize" || key === "history" || key === "download" || key === "download-history") {
+  if (leafKeys.includes(key)) {
     active.value = key as ViewKey;
   }
 }
@@ -192,13 +243,42 @@ onUnmounted(stopPoll);
     </a-layout-sider>
 
     <a-layout-content class="content">
-      <download-view
-        v-if="active === 'download'"
-        :logged-in="loggedIn"
-      />
-      <recognizer-view v-else-if="active === 'recognize'" />
-      <history-view v-else-if="active === 'history'" kind="recognize" />
-      <history-view v-else-if="active === 'download-history'" kind="download" />
+      <!-- keep-alive：缓存各视图组件实例，切换界面时不销毁，
+           保留下载任务列表/进度、识别结果等状态与事件监听 -->
+      <keep-alive>
+        <download-view
+          v-if="active === 'download'"
+          key="view-download"
+          :logged-in="loggedIn"
+        />
+        <recognizer-view v-else-if="active === 'recognize'" key="view-recognize" />
+        <history-view
+          v-else-if="active === 'history'"
+          key="view-history-recognize"
+          kind="recognize"
+        />
+        <history-view
+          v-else-if="active === 'download-history'"
+          key="view-history-download"
+          kind="download"
+        />
+        <aria2-view
+          v-else-if="active === 'aria2-download'"
+          key="view-aria2-download"
+        />
+        <history-view
+          v-else-if="active === 'aria2-history'"
+          key="view-history-aria2"
+          kind="aria2"
+        />
+        <quality-view v-else-if="active === 'quality'" key="view-quality" />
+        <history-view
+          v-else-if="active === 'quality-history'"
+          key="view-history-quality"
+          kind="enhance"
+        />
+        <port-check-view v-else-if="active === 'port-check'" key="view-port-check" />
+      </keep-alive>
     </a-layout-content>
   </a-layout>
 

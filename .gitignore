@@ -35,8 +35,15 @@ src-tauri/icon-src.png
 !bin/
 bin/fpcalc.exe
 bin/ffmpeg.exe
+bin/ffprobe.exe
 bin/ffmpeg
 bin/ffmpeg-*
+models/*.pt
+models/*.pth
+models/*.ts
+models/*.zip
+models/*.tar.gz
+models/cache/
 bilidown/
 bilidownload/
 
@@ -55,3 +62,10 @@ wbi_cache.json
 # 历史记录数据库（本地 SQLite，不入库）
 history.db
 **/history.db
+
+# 运行日志
+*.log
+bin/aria2/aria2.log
+
+# Vite 临时文件（配置热重载生成）
+vite.config.ts.timestamp-*.mjs

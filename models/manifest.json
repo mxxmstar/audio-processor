@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "models": [
+    {
+      "id": "deepfilternet2-speech",
+      "backend": "deepfilternet",
+      "version": "0.5.6-model-96",
+      "file": "cache/DeepFilterNet2.zip",
+      "runtime_path": "cache/DeepFilterNet2-extracted/DeepFilterNet2",
+      "sha256": "850e695d1c27f2a7b4dcd89b16bc8d49367effc680b1369e995e31d46376cba7",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://github.com/Rikorose/DeepFilterNet/tree/main/models/DeepFilterNet2.zip"
+    },
+    {
+      "id": "audiosr-basic",
+      "backend": "audiosr",
+      "model_name": "basic",
+      "version": "0.0.7+74a47f49061a1e788e968cc43ad45c0b6243f37d",
+      "file": "cache/audiosr-basic/pytorch_model.bin",
+      "size_bytes": 6178189563,
+      "sha256": "8a3506b9619ed32435ce2c115604750c7bddb5ad8502be7b1a3131bde878aa01",
+      "source": "https://huggingface.co/haoheliu/audiosr_basic/resolve/74a47f49061a1e788e968cc43ad45c0b6243f37d/pytorch_model.bin",
+      "upstream": "https://github.com/haoheliu/versatile_audio_super_resolution"
+    }
+  ]
+}

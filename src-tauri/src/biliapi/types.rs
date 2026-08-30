@@ -230,7 +230,10 @@ pub struct Dash {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Flac {
-    pub audio: Media,
+    /// 部分视频无 FLAC 音轨，B 站会返回 `"flac": null`，
+    /// 故 audio 可能为 null，需用 Option 容错。
+    #[serde(default)]
+    pub audio: Option<Media>,
 }
 
 #[derive(Debug, Deserialize, Default)]
