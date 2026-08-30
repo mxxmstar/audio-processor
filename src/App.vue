@@ -6,6 +6,7 @@ import RecognizerView from "./RecognizerView.vue";
 import HistoryView from "./HistoryView.vue";
 import Aria2View from "./Aria2View.vue";
 import QualityView from "./QualityView.vue";
+import PortCheckView from "./PortCheckView.vue";
 import {
   DownloadOutlined,
   AudioOutlined,
@@ -15,6 +16,7 @@ import {
   UserOutlined,
   CloudDownloadOutlined,
   SoundOutlined,
+  ApiOutlined,
 } from "@ant-design/icons-vue";
 
 type ViewKey =
@@ -25,7 +27,8 @@ type ViewKey =
   | "aria2-download"
   | "aria2-history"
   | "quality"
-  | "quality-history";
+  | "quality-history"
+  | "port-check";
 const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
 const openKeys = ref<string[]>([]);
@@ -68,6 +71,11 @@ const items = [
       { key: "quality-history", icon: h(HistoryOutlined), label: "历史记录" },
     ],
   },
+  {
+    key: "port-check",
+    icon: h(ApiOutlined),
+    label: "端口占用",
+  },
 ];
 
 // 可切换主视图的子项（父分组项不参与切换）
@@ -80,6 +88,7 @@ const leafKeys: string[] = [
   "aria2-history",
   "quality",
   "quality-history",
+  "port-check",
 ];
 
 function onMenuClick({ key }: { key: string }) {
@@ -268,6 +277,7 @@ onUnmounted(stopPoll);
           key="view-history-quality"
           kind="enhance"
         />
+        <port-check-view v-else-if="active === 'port-check'" key="view-port-check" />
       </keep-alive>
     </a-layout-content>
   </a-layout>
