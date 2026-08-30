@@ -112,6 +112,66 @@ pub fn check_port(port: u16) -> Result<bool, String> {
     }
 }
 
+/// 终止指定 PID 的进程
+///
+/// 在 Windows 上使用 `taskkill /F /PID <pid>` 强制终止进程。
+/// 返回被杀进程的进程名（如能获取到）。
+pub fn kill_process(pid: u32) -> Result<String, String> {
+    let process_name = get_process_names().get(&pid).cloned().unwrap_or_default();
+
+    let output = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("执行 taskkill 失败: {e}"))?;
+
+    if output.status.success() {
+        Ok(process_name)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // taskkill 中文输出可能包含 "成功" 但退出码非零，检查 stdout
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("成功") || stderr.contains("成功") {
+            Ok(process_name)
+        } else {
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            Err(format!("终止进程 {pid} 失败: {msg}"))
+        }
+    }
+}
+
+/// 终止占用指定端口的进程
+///
+/// 自动查找占用该端口的第一个进程并终止。
+/// 返回被终止的进程信息（PID、进程名、协议）。
+pub fn kill_process_by_port(port: u16) -> Result<PortInfo, String> {
+    let filter = PortQuery {
+        port: Some(port),
+        protocol: None,
+        state: Some("LISTENING".to_string()),
+        pid: None,
+    };
+    let ports = query_ports(Some(&filter))?;
+
+    if ports.is_empty() {
+        return Err(format!("端口 {port} 未被占用"));
+    }
+
+    // 优先杀 LISTENING 状态的 TCP 进程
+    let target = ports
+        .iter()
+        .find(|p| p.protocol == "TCP" && p.state == "LISTENING")
+        .or_else(|| ports.first())
+        .ok_or_else(|| format!("端口 {port} 未被占用"))?;
+
+    let pid = target.pid;
+    if pid == 0 || pid == 4 {
+        return Err(format!("端口 {port} 被系统进程 (PID={pid}) 占用，无法终止"));
+    }
+
+    kill_process(pid)?;
+    Ok(target.clone())
+}
+
 /// 查询指定进程占用的端口
 pub fn query_ports_by_pid(pid: u32) -> Result<Vec<PortInfo>, String> {
     let filter = PortQuery {

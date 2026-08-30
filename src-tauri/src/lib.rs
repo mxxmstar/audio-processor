@@ -85,6 +85,9 @@ pub fn run() {
             commands::port_checker::port_query,
             commands::port_checker::port_check,
             commands::port_checker::port_query_by_pid,
+            // 端口占用 kill 命令
+            commands::port_checker::port_kill_process,
+            commands::port_checker::port_kill_by_port,
         ])
         // 注册对话框插件（前端用其打开文件选择框）
         .plugin(tauri_plugin_dialog::init())
