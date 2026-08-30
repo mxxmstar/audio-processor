@@ -592,6 +592,51 @@ def cached_audiosr(
         return cached
 
 
+def patch_audiosr_lowpass_cutoff() -> tuple[Any, Any] | None:
+    """限制 AudioSR 的 lowpass 截止频率，使归一化频率严格满足 0 < Wn < 1。
+
+    AudioSR 依据输入频谱估算截止频率，再用 scipy 设计低通滤波器。当估算值达到
+    奈奎斯特频率（48 kHz 下为 24000 Hz）时，归一化截止频率 Wn == 1，scipy 抛出
+    "Digital filter critical frequencies must be 0 < Wn < 1"。
+
+    触发场景有两种，均属上游缺陷：
+    1. 输入已接近满带宽，频谱能量直达最高频点，估算出的截止频率等于奈奎斯特；
+    2. AudioSR 的「几乎静音」回退分支直接把截止频率设为 24000。
+
+    这里把截止频率夹到 0.995 倍奈奎斯特，既保证滤波器可设计，也几乎不改变
+    听感（仅在最高频段做极轻微衰减）。
+    """
+    utils_module = sys.modules.get("audiosr.utils")
+    if utils_module is None:
+        return None
+    original = getattr(utils_module, "lowpass", None)
+    if original is None:
+        return None
+
+    def clamped_lowpass(
+        data: Any, highcut: float, fs: float, order: int = 5, _type: str = "butter"
+    ) -> Any:
+        nyquist = 0.5 * float(fs)
+        safe_cutoff = max(min(float(highcut), nyquist * 0.995), 1.0)
+        if os.environ.get("AUDIO_AI_DEBUG") == "1" and safe_cutoff < float(highcut):
+            print(
+                f"audiosr lowpass cutoff clamped: {highcut} -> {safe_cutoff}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return original(data, highcut=safe_cutoff, fs=fs, order=order, _type=_type)
+
+    utils_module.lowpass = clamped_lowpass
+    return utils_module, original
+
+
+def restore_audiosr_lowpass_cutoff(patch: tuple[Any, Any] | None) -> None:
+    if patch is None:
+        return
+    utils_module, original = patch
+    utils_module.lowpass = original
+
+
 def infer_audiosr(
     model: Any,
     super_resolution_fn: Any,
@@ -630,6 +675,7 @@ def infer_audiosr(
             raise RuntimeError("AudioSR WAV read returned no samples")
         return torch.from_numpy(np.ascontiguousarray(samples.T)), int(sample_rate)
 
+    lowpass_patch = patch_audiosr_lowpass_cutoff()
     try:
         # torchaudio 2.11 delegates load() to TorchCodec, which is optional.
         # AudioSR only reads the temporary WAV produced above, so soundfile is
@@ -653,6 +699,7 @@ def infer_audiosr(
         raise WorkerFailure("INFERENCE_FAILED", str(error)) from error
     finally:
         torchaudio.load = original_torchaudio_load
+        restore_audiosr_lowpass_cutoff(lowpass_patch)
 
     if isinstance(predicted, torch.Tensor):
         result = predicted.detach().float().cpu().numpy()
