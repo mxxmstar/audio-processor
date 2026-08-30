@@ -8,6 +8,7 @@ pub mod biliapi; // B 站 API 封装（基于 http_client，封装 bilidownload 
 pub mod bili_state; // 阶段 5：B 站功能共享状态（登录态目录 + 任务列表）
 pub mod history; // 通用历史记录模块（音频识别 / B站下载共用）
 pub mod aria2; // aria2 下载器模块
+pub mod port_checker; // 端口占用查询模块
 
 use bili_state::BiliState;
 use commands::audio_quality::AudioQualityState;
@@ -80,6 +81,10 @@ pub fn run() {
             commands::aria2::aria2_refresh_tasks,
             commands::aria2::aria2_get_history,
             commands::aria2::aria2_cleanup_completed,
+            // 端口占用查询命令
+            commands::port_checker::port_query,
+            commands::port_checker::port_check,
+            commands::port_checker::port_query_by_pid,
         ])
         // 注册对话框插件（前端用其打开文件选择框）
         .plugin(tauri_plugin_dialog::init())

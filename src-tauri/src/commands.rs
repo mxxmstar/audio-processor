@@ -11,6 +11,8 @@ pub mod bili;
 pub mod audio_quality;
 /// aria2 下载器相关 Tauri 命令
 pub mod aria2;
+/// 端口占用查询相关 Tauri 命令
+pub mod port_checker;
 
 /// 解析历史数据库目录：优先应用配置目录，回退资源目录，再回退仓库 bin 旁。
 /// 供 `commands` 与 `commands::bili` 共用。
