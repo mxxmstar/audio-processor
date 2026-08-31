@@ -27,6 +27,10 @@ src-tauri/icon-src.png
 *.webm
 *.flac
 *.mp3
+*.wav
+
+# Windows 资源管理器生成的目录配置文件
+desktop.ini
 # 但保留测试样例音频
 !01.*.mp3
 !*.sample.mp3

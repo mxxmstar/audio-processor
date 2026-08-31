@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import types
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,33 @@ class WorkerFailure(Exception):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+def _log(message: str) -> None:
+    """把关键诊断信息写入 stderr。
+
+    stdout 独占于 JSONL 协议，不能混入任何非协议输出；而 Rust 侧会完整采集
+    stderr 并过滤掉进度条噪声，因此 stderr 是定位「进程异常退出但没有
+    traceback」这类问题的唯一可靠通道。
+    """
+    print(message, file=sys.stderr, flush=True)
+
+
+def _read_stdin_line() -> str | None:
+    """安全读取一行协议输入。
+
+    直接 `for line in sys.stdin` 迭代时，解码错误或 I/O 错误会以异常形式冲出
+    主循环：在途任务被杀死、进程以退出码 1 结束，且协议上收不到任何事件，
+    极难定位。这里把这类错误记录到 stderr 并视为输入结束，让主循环正常收尾。
+    """
+    try:
+        return sys.stdin.readline()
+    except (UnicodeDecodeError, OSError) as error:
+        _log(
+            f"stdin read failed: {type(error).__name__}: {error}\n"
+            f"{traceback.format_exc()}"
+        )
+        return None
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -960,9 +988,18 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
         peak = 1.0
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     emit_progress(request_id, "write_output", 95.0, message="writing AI master")
+    _log(
+        f"encode start: output={output_path} rate={sample_rate} "
+        f"channels={channels} frames={output.shape[1]}"
+    )
     encode_audio(output, output_path, sample_rate, channels)
-    if not Path(output_path).is_file() or Path(output_path).stat().st_size == 0:
+    written = (
+        Path(output_path).stat().st_size if Path(output_path).is_file() else -1
+    )
+    _log(f"encode done: size={written}")
+    if not Path(output_path).is_file() or written == 0:
         raise WorkerFailure("OUTPUT_INVALID", "AI output file is empty")
+    _log("encode verified, building result payload")
     return {
         "protocol_version": PROTOCOL_VERSION,
         "request_id": request_id,
@@ -981,12 +1018,20 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
 def process_in_thread(request: dict[str, Any], cancel_event: threading.Event) -> None:
     request_id = str(request.get("request_id", ""))
     try:
-        emit(enhance(request, cancel_event))
+        result = enhance(request, cancel_event)
+        emit(result)
+        _log("result emitted")
     except WorkerFailure as failure:
         emit_error(request_id, failure)
-    except Exception as error:  # Keep unexpected model errors inside the protocol.
-        print(f"unexpected worker error: {error!r}", file=sys.stderr, flush=True)
-        emit_error(request_id, WorkerFailure("INFERENCE_FAILED", str(error)))
+    except BaseException as error:  # noqa: BLE001
+        # 这里必须连 SystemExit / KeyboardInterrupt 一起兜住：它们是
+        # BaseException 而非 Exception，漏掉会让线程静默死亡，进程随后以
+        # 退出码 1 结束且协议上收不到任何 error，表现为「进程异常退出」。
+        _log(f"unhandled worker error:\n{traceback.format_exc()}")
+        emit_error(
+            request_id,
+            WorkerFailure("INFERENCE_FAILED", f"{type(error).__name__}: {error}"),
+        )
 
 
 def prepare_model_for_request(request: dict[str, Any], model_dir: Path) -> None:
@@ -1026,7 +1071,10 @@ def main() -> int:
 
     active_thread: threading.Thread | None = None
     cancel_event = threading.Event()
-    for line in sys.stdin:
+    while True:
+        line = _read_stdin_line()
+        if not line:  # EOF 或读取失败
+            break
         try:
             request = json.loads(line)
         except json.JSONDecodeError:
@@ -1052,8 +1100,11 @@ def main() -> int:
                 emit_error(request_id, WorkerFailure("MODEL_LOAD_FAILED", str(error)))
                 continue
             cancel_event.clear()
+            # 必须用非守护线程：主线程一旦退出，守护线程会被立即杀死，
+            # 正在写回的结果 / 错误事件会随之丢失，表现为「进程异常退出、
+            # 退出码 1 且协议上收不到任何事件」，而文件其实已经生成成功。
             active_thread = threading.Thread(
-                target=process_in_thread, args=(request, cancel_event), daemon=True
+                target=process_in_thread, args=(request, cancel_event), daemon=False
             )
             active_thread.start()
         elif command == "cancel":
