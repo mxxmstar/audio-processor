@@ -668,12 +668,48 @@ fn worker_exit_error(code: Option<i32>, stderr: &str) -> WorkerError {
     let detail = if stderr.is_empty() {
         String::new()
     } else {
-        format!("，stderr: {}", stderr_tail(stderr, MAX_ERROR_STDERR_BYTES))
+        // 先剔除进度条噪声，否则真正的异常堆栈会被进度条完全淹没
+        let cleaned = strip_progress_noise(stderr);
+        if cleaned.is_empty() {
+            "，stderr: (stderr 仅含进度条输出，已过滤；未捕获到异常信息)".to_string()
+        } else {
+            format!("，stderr: {}", stderr_tail(&cleaned, MAX_ERROR_STDERR_BYTES))
+        }
     };
     WorkerError::Exited {
         code,
         stderr: detail,
     }
+}
+
+/// 剔除 tqdm 等进度条片段。
+///
+/// AudioSR 的 DDIM 采样会把上万个进度条片段以 `\r` 反复重绘写入 stderr，
+/// 直接截断尾部会让真正的异常堆栈被完全淹没，导致无法定位失败原因。
+/// 这里先按 `\n` / `\r` 切分并丢弃进度条片段，再取末尾，保证 traceback 可见。
+fn strip_progress_noise(stderr: &str) -> String {
+    stderr
+        .split(['\n', '\r'])
+        .filter(|part| !is_progress_noise(part))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 判断一个片段是否为进度条输出（tqdm / AudioSR DDIM Sampler）。
+fn is_progress_noise(line: &str) -> bool {
+    let trimmed = line.trim();
+    // 进度条反复重绘会产生大量空片段，一并丢弃
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.contains("DDIM Sampler") || trimmed.contains("Running DDIM Sampling") {
+        return true;
+    }
+    // tqdm 的典型特征：进度条 "%|" 与速率 "it/s" / "s/it"
+    if trimmed.contains("it/s") || trimmed.contains("s/it") || trimmed.contains("%|") {
+        return true;
+    }
+    false
 }
 
 fn stderr_tail(stderr: &str, max_bytes: usize) -> String {
@@ -846,5 +882,33 @@ mod tests {
             .unwrap();
         assert!(progress_count.load(Ordering::Relaxed) > 0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn strip_progress_noise_keeps_traceback() {
+        // 模拟 AudioSR：大量 tqdm 进度条（\r 重绘）淹没真正的异常堆栈
+        let mut stderr = String::new();
+        for i in 0..200 {
+            stderr.push_str(&format!(
+                "DDIM Sampler: {:3}%|█████ | {}/200 [00:01<00:02, 1.60it/s]\r",
+                i / 2,
+                i
+            ));
+        }
+        stderr.push_str("Traceback (most recent call last):\n");
+        stderr.push_str("  File \"worker.py\", line 932, in enhance\n");
+        stderr.push_str("MemoryError: unable to allocate 115 MiB\n");
+
+        let cleaned = strip_progress_noise(&stderr);
+        assert!(!cleaned.contains("DDIM Sampler"), "进度条应被过滤: {cleaned}");
+        assert!(!cleaned.contains("it/s"), "进度条速率应被过滤: {cleaned}");
+        assert!(cleaned.contains("MemoryError"), "真实异常应保留: {cleaned}");
+        assert!(cleaned.contains("Traceback"), "traceback 应保留: {cleaned}");
+    }
+
+    #[test]
+    fn strip_progress_noise_all_noise_becomes_empty() {
+        let stderr = "Running DDIM Sampling with 50 timesteps\rDDIM Sampler: 100%|████| 50/50 [00:30<00:00, 1.61it/s]";
+        assert_eq!(strip_progress_noise(stderr), "");
     }
 }

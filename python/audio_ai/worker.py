@@ -205,7 +205,6 @@ def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels
         raise WorkerFailure("UNSUPPORTED_OUTPUT", "AI master output must be WAV or FLAC")
 
     ffmpeg = resolve_binary("ffmpeg", "AUDIO_AI_FFMPEG")
-    pcm = np.ascontiguousarray(audio.T, dtype=np.float32).tobytes()
     command = [
         ffmpeg,
         "-y",
@@ -223,9 +222,41 @@ def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels
         codec,
         output_path,
     ]
-    result = subprocess.run(command, input=pcm, capture_output=True, check=False)
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
+    # 交错后的 PCM 可能高达数百 MB。若一次性转成 bytes 再交给 subprocess，
+    # 峰值内存会翻倍（副本 + bytes），长音频容易把 Worker 进程直接拖死，
+    # 且不会产生任何 traceback（表现为「进程异常退出，退出码 1」）。
+    # 这里改为分块写入 stdin，并且用临时文件接收 stderr 以避免双向管道死锁。
+    interleaved = np.ascontiguousarray(audio.T, dtype=np.float32)
+    block_frames = max(1, 262_144 // max(1, channels))
+    try:
+        with tempfile.TemporaryFile() as error_file:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=error_file,
+            )
+            try:
+                assert process.stdin is not None
+                total_frames = interleaved.shape[0]
+                for start in range(0, total_frames, block_frames):
+                    block = interleaved[start : start + block_frames]
+                    process.stdin.write(block.tobytes())
+            except (BrokenPipeError, ValueError, OSError):
+                # ffmpeg 提前退出（参数 / 路径问题）；真实原因在 stderr 中
+                pass
+            finally:
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+            returncode = process.wait()
+            error_file.seek(0)
+            detail = error_file.read().decode("utf-8", errors="replace").strip()
+    except OSError as error:
+        raise WorkerFailure("ENCODE_FAILED", f"cannot start ffmpeg: {error}") from error
+    if returncode != 0:
         raise WorkerFailure("ENCODE_FAILED", detail or "ffmpeg encode failed")
 
 
