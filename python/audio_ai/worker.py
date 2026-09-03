@@ -21,7 +21,7 @@ import threading
 import traceback
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 # AudioSR indirectly imports Transformers. Keep the inference Worker offline;
 # model installation is handled by the separate, explicit model_manager.py.
@@ -69,6 +69,8 @@ AUDIOSR_MAX_CHUNK_SECONDS = 10.24
 AUDIOSR_DDIM_STEPS = 50
 AUDIOSR_GUIDANCE_SCALE = 3.5
 STARTUP_HASH_MAX_BYTES = 128 * 1024 * 1024
+# 编码时每个写块的目标采样点数（约 1 MB / 块，兼顾吞吐与内存占用）
+ENCODE_BLOCK_SAMPLES = 262_144
 
 
 class WorkerFailure(Exception):
@@ -221,20 +223,22 @@ def decode_audio(path: str, sample_rate: int, channels: int) -> np.ndarray:
     return audio
 
 
-def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels: int) -> None:
+def codec_for_output(output_path: str) -> str:
     suffix = output_path.lower()
     if suffix.endswith(".part"):
         suffix = suffix[:-5]
     if suffix.endswith(".flac"):
-        codec = "flac"
-    elif suffix.endswith(".wav"):
-        codec = "pcm_s16le"
-    else:
-        raise WorkerFailure("UNSUPPORTED_OUTPUT", "AI master output must be WAV or FLAC")
+        return "flac"
+    if suffix.endswith(".wav"):
+        return "pcm_s16le"
+    raise WorkerFailure("UNSUPPORTED_OUTPUT", "AI master output must be WAV or FLAC")
 
-    ffmpeg = resolve_binary("ffmpeg", "AUDIO_AI_FFMPEG")
-    command = [
-        ffmpeg,
+
+def ffmpeg_encode_command(
+    output_path: str, sample_rate: int, channels: int, codec: str
+) -> list[str]:
+    return [
+        resolve_binary("ffmpeg", "AUDIO_AI_FFMPEG"),
         "-y",
         "-v",
         "error",
@@ -250,12 +254,15 @@ def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels
         codec,
         output_path,
     ]
-    # 交错后的 PCM 可能高达数百 MB。若一次性转成 bytes 再交给 subprocess，
-    # 峰值内存会翻倍（副本 + bytes），长音频容易把 Worker 进程直接拖死，
-    # 且不会产生任何 traceback（表现为「进程异常退出，退出码 1」）。
-    # 这里改为分块写入 stdin，并且用临时文件接收 stderr 以避免双向管道死锁。
-    interleaved = np.ascontiguousarray(audio.T, dtype=np.float32)
-    block_frames = max(1, 262_144 // max(1, channels))
+
+
+def run_ffmpeg_with_blocks(command: list[str], blocks: Iterator[np.ndarray]) -> None:
+    """把交错的 PCM 块（形状 (frames, channels) 的 float32）写入 ffmpeg。
+
+    交错后的 PCM 可能高达数百 MB：一次性转成 bytes 会让峰值内存翻倍，长音频
+    容易把 Worker 进程拖死且不产生任何 traceback。这里分块写入 stdin，并用
+    临时文件接收 stderr，避免 stdin/stderr 双向管道互相阻塞。
+    """
     try:
         with tempfile.TemporaryFile() as error_file:
             process = subprocess.Popen(
@@ -265,11 +272,10 @@ def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels
                 stderr=error_file,
             )
             try:
-                assert process.stdin is not None
-                total_frames = interleaved.shape[0]
-                for start in range(0, total_frames, block_frames):
-                    block = interleaved[start : start + block_frames]
-                    process.stdin.write(block.tobytes())
+                stdin = process.stdin
+                assert stdin is not None
+                for block in blocks:
+                    stdin.write(block.tobytes())
             except (BrokenPipeError, ValueError, OSError):
                 # ffmpeg 提前退出（参数 / 路径问题）；真实原因在 stderr 中
                 pass
@@ -286,6 +292,57 @@ def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels
         raise WorkerFailure("ENCODE_FAILED", f"cannot start ffmpeg: {error}") from error
     if returncode != 0:
         raise WorkerFailure("ENCODE_FAILED", detail or "ffmpeg encode failed")
+
+
+def encode_audio(audio: np.ndarray, output_path: str, sample_rate: int, channels: int) -> None:
+    """把内存中的 (channels, frames) 音频编码为 WAV / FLAC。"""
+    interleaved = np.ascontiguousarray(audio.T, dtype=np.float32)
+    block_frames = max(1, ENCODE_BLOCK_SAMPLES // max(1, channels))
+
+    def blocks() -> Iterator[np.ndarray]:
+        for start in range(0, interleaved.shape[0], block_frames):
+            yield interleaved[start : start + block_frames]
+
+    run_ffmpeg_with_blocks(
+        ffmpeg_encode_command(
+            output_path, sample_rate, channels, codec_for_output(output_path)
+        ),
+        blocks(),
+    )
+
+
+def encode_pcm_file(
+    pcm_path: Path,
+    output_path: str,
+    sample_rate: int,
+    channels: int,
+    gain: float = 1.0,
+) -> None:
+    """流式把 f32le 暂存文件编码为目标格式，内存中只保留一个块。
+
+    与「分块写盘」配合：定稿的 PCM 先落盘，编码阶段再分块读出，
+    因此完整结果无需常驻内存。
+    """
+    block_frames = max(1, ENCODE_BLOCK_SAMPLES // max(1, channels))
+    frame_bytes = max(1, channels) * 4
+
+    def blocks() -> Iterator[np.ndarray]:
+        with open(pcm_path, "rb") as source:
+            while True:
+                raw = source.read(block_frames * frame_bytes)
+                if not raw:
+                    return
+                block = np.frombuffer(raw, dtype=np.float32).reshape(-1, channels)
+                if gain != 1.0:
+                    block = (block * gain).astype(np.float32)
+                yield block
+
+    run_ffmpeg_with_blocks(
+        ffmpeg_encode_command(
+            output_path, sample_rate, channels, codec_for_output(output_path)
+        ),
+        blocks(),
+    )
 
 
 def model_candidates(model_id: str, model_dir: Path) -> list[Path]:
@@ -842,6 +899,59 @@ def infer_chunk(model: torch.jit.ScriptModule, chunk: np.ndarray, device: torch.
     return result
 
 
+class ChunkAssembler:
+    """分块推理结果的重叠相加（OLA）累加器，支持定稿后立即输出。
+
+    相邻分块之间有淡入淡出重叠，所以某段样本只有在「下一块处理完、不会再
+    被继续累加」之后才算定稿。定稿后立即取出并写盘，完整结果就无需常驻
+    内存 —— 长音频可省下数百 MB。
+
+    语义与「先整体累加、最后统一除以权重」完全等价：归一化是逐元素运算，
+    每个样本最终的累加值与累加权重都不变，提前做除法结果一致。
+    """
+
+    def __init__(self, channels: int) -> None:
+        self._flush_pos = 0
+        self._pending = np.zeros((channels, 0), dtype=np.float32)
+        self._weights = np.zeros((1, 0), dtype=np.float32)
+
+    def add(
+        self, start: int, end: int, predicted: np.ndarray, blend: np.ndarray
+    ) -> None:
+        """把 [start, end) 的推理结果按 blend 权重累加进待定稿区。"""
+        valid = end - start
+        if valid <= 0:
+            return
+        need = end - self._flush_pos
+        if self._pending.shape[1] < need:
+            grow = need - self._pending.shape[1]
+            self._pending = np.pad(self._pending, ((0, 0), (0, grow)))
+            self._weights = np.pad(self._weights, ((0, 0), (0, grow)))
+        offset = start - self._flush_pos
+        self._pending[:, offset : offset + valid] += predicted[:, :valid] * blend
+        self._weights[:, offset : offset + valid] += blend
+
+    def take_final(self, boundary: int) -> np.ndarray | None:
+        """取出已定稿的 [已写出位置, boundary) 样本（已按权重归一化）。"""
+        count = boundary - self._flush_pos
+        if count <= 0:
+            return None
+        return self._pop(count)
+
+    def remaining(self) -> np.ndarray | None:
+        """取出全部剩余样本。"""
+        if self._pending.shape[1] == 0:
+            return None
+        return self._pop(self._pending.shape[1])
+
+    def _pop(self, count: int) -> np.ndarray:
+        region = self._pending[:, :count] / np.maximum(self._weights[:, :count], 1e-8)
+        self._pending = self._pending[:, count:]
+        self._weights = self._weights[:, count:]
+        self._flush_pos += count
+        return np.ascontiguousarray(region, dtype=np.float32)
+
+
 def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str, Any]:
     request_id = str(request.get("request_id", ""))
     input_path = str(request.get("input_path", ""))
@@ -910,8 +1020,9 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     chunk_size = max(1, int(chunk_seconds * sample_rate))
     overlap = min(chunk_size - 1, max(0, int(overlap_seconds * sample_rate)))
     step = chunk_size - overlap
-    output = np.zeros_like(audio)
-    weights = np.zeros((1, audio.shape[1]), dtype=np.float32)
+    # 分块写盘：不再分配与整段等长的 output/weights，改为滚动累加 + 定稿即落盘
+    assembler = ChunkAssembler(channels)
+    peak = 0.0
     total_seconds = audio.shape[1] / sample_rate
     starts = range(0, audio.shape[1], step)
     start_list = list(starts)
@@ -966,8 +1077,14 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
                 blend[-min(overlap, valid) :] *= np.linspace(
                     1.0, 0.0, min(overlap, valid), endpoint=False, dtype=np.float32
                 )
-            output[:, start:end] += predicted[:, :valid] * blend
-            weights[:, start:end] += blend
+            assembler.add(start, end, predicted, blend)
+            # [start, 下一块起点) 不会再被后续分块修改，已定稿 → 立即写盘
+            next_start = (
+                start_list[index + 1]
+                if index + 1 < len(start_list)
+                else audio.shape[1]
+            )
+            _flush_region(assembler.take_final(next_start))
             emit_progress(
                 request_id,
                 "inference",
@@ -975,24 +1092,24 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
                 processed_seconds=end / sample_rate,
                 total_seconds=total_seconds or source_duration,
             )
-    finally:
-        if temporary_dir_context is not None:
-            temporary_dir_context.cleanup()
+        finally:
+            if temporary_dir_context is not None:
+                temporary_dir_context.cleanup()
+        # 收尾：写出最后一段剩余样本
+        _flush_region(assembler.remaining())
 
-    output /= np.maximum(weights, 1e-8)
-    if not np.isfinite(output).all():
+    if not np.isfinite(peak) or peak < 0.0:
         raise WorkerFailure("OUTPUT_INVALID", "enhanced output contains NaN or Inf")
-    peak = float(np.max(np.abs(output)))
+    gain = 1.0 / peak if peak > 1.0 else 1.0
     if peak > 1.0:
-        output = output / peak
         peak = 1.0
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     emit_progress(request_id, "write_output", 95.0, message="writing AI master")
     _log(
         f"encode start: output={output_path} rate={sample_rate} "
-        f"channels={channels} frames={output.shape[1]}"
+        f"channels={channels} frames={audio.shape[1]} gain={gain:.6f}"
     )
-    encode_audio(output, output_path, sample_rate, channels)
+    encode_pcm_file(pcm_path, output_path, sample_rate, channels, gain=gain)
     written = (
         Path(output_path).stat().st_size if Path(output_path).is_file() else -1
     )
