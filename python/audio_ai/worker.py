@@ -952,6 +952,50 @@ class ChunkAssembler:
         return np.ascontiguousarray(region, dtype=np.float32)
 
 
+class PcmChunkWriter:
+    """把定稿的 `(channels, frames)` 音频块顺序追加到 f32le 暂存文件。
+
+    与 `ChunkAssembler` 配套：后者负责重叠相加，本类负责把定稿结果尽快
+    落盘，因此完整结果无需常驻内存（长音频可省下数百 MB）。
+
+    同时增量统计峰值。`enhance()` 过去把 `peak` 初始化为 0.0 却从不更新，
+    导致归一化增益恒为 1.0、`peak_db` 恒为 −160 dB；峰值只能在这里统计，
+    因为样本一旦落盘就不再回头。
+    """
+
+    def __init__(self, channels: int) -> None:
+        self.channels = channels
+        self.peak = 0.0
+        handle = tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".f32le", prefix="audio-processor-pcm-", delete=False
+        )
+        self._handle = handle
+        self.path = Path(handle.name)
+
+    def write(self, region: np.ndarray | None) -> None:
+        """写入一块定稿音频；`None` 表示当前没有可定稿的样本。"""
+        if region is None or region.size == 0:
+            return
+        magnitude = float(np.abs(region).max())
+        if magnitude > self.peak:
+            self.peak = magnitude
+        # 暂存文件是交错布局（frame-major），与 encode_pcm_file 的读取方式一致
+        self._handle.write(np.ascontiguousarray(region.T, dtype=np.float32).tobytes())
+
+    def close(self) -> None:
+        if not self._handle.closed:
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
+            self._handle.close()
+
+    def discard(self) -> None:
+        """关闭并删除暂存文件。成功与失败路径都要调用，避免留下大文件。"""
+        try:
+            self.close()
+        finally:
+            self.path.unlink(missing_ok=True)
+
+
 def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str, Any]:
     request_id = str(request.get("request_id", ""))
     input_path = str(request.get("input_path", ""))
@@ -1022,7 +1066,7 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     step = chunk_size - overlap
     # 分块写盘：不再分配与整段等长的 output/weights，改为滚动累加 + 定稿即落盘
     assembler = ChunkAssembler(channels)
-    peak = 0.0
+    sink = PcmChunkWriter(channels)
     total_seconds = audio.shape[1] / sample_rate
     starts = range(0, audio.shape[1], step)
     start_list = list(starts)
@@ -1084,7 +1128,7 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
                 if index + 1 < len(start_list)
                 else audio.shape[1]
             )
-            _flush_region(assembler.take_final(next_start))
+            sink.write(assembler.take_final(next_start))
             emit_progress(
                 request_id,
                 "inference",
@@ -1092,31 +1136,38 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
                 processed_seconds=end / sample_rate,
                 total_seconds=total_seconds or source_duration,
             )
-        finally:
-            if temporary_dir_context is not None:
-                temporary_dir_context.cleanup()
         # 收尾：写出最后一段剩余样本
-        _flush_region(assembler.remaining())
+        sink.write(assembler.remaining())
+        sink.close()
 
-    if not np.isfinite(peak) or peak < 0.0:
-        raise WorkerFailure("OUTPUT_INVALID", "enhanced output contains NaN or Inf")
-    gain = 1.0 / peak if peak > 1.0 else 1.0
-    if peak > 1.0:
-        peak = 1.0
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    emit_progress(request_id, "write_output", 95.0, message="writing AI master")
-    _log(
-        f"encode start: output={output_path} rate={sample_rate} "
-        f"channels={channels} frames={audio.shape[1]} gain={gain:.6f}"
-    )
-    encode_pcm_file(pcm_path, output_path, sample_rate, channels, gain=gain)
-    written = (
-        Path(output_path).stat().st_size if Path(output_path).is_file() else -1
-    )
-    _log(f"encode done: size={written}")
-    if not Path(output_path).is_file() or written == 0:
-        raise WorkerFailure("OUTPUT_INVALID", "AI output file is empty")
-    _log("encode verified, building result payload")
+        peak = sink.peak
+        if not np.isfinite(peak) or peak < 0.0:
+            raise WorkerFailure("OUTPUT_INVALID", "enhanced output contains NaN or Inf")
+        gain = 1.0 / peak if peak > 1.0 else 1.0
+        if peak > 1.0:
+            peak = 1.0
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        emit_progress(request_id, "write_output", 95.0, message="writing AI master")
+        _log(
+            f"encode start: output={output_path} rate={sample_rate} "
+            f"channels={channels} frames={audio.shape[1]} gain={gain:.6f} "
+            f"peak={peak:.6f}"
+        )
+        encode_pcm_file(sink.path, output_path, sample_rate, channels, gain=gain)
+        written = (
+            Path(output_path).stat().st_size if Path(output_path).is_file() else -1
+        )
+        _log(f"encode done: size={written}")
+        if not Path(output_path).is_file() or written == 0:
+            raise WorkerFailure("OUTPUT_INVALID", "AI output file is empty")
+        _log("encode verified, building result payload")
+    finally:
+        # 成功、失败、取消三条路径都要清理：AudioSR 的临时 WAV 目录，以及
+        # 定稿 PCM 暂存文件（长音频可达数百 MB，遗漏会在系统临时目录堆积）。
+        # 此时编码已结束，暂存文件不再需要。
+        if temporary_dir_context is not None:
+            temporary_dir_context.cleanup()
+        sink.discard()
     return {
         "protocol_version": PROTOCOL_VERSION,
         "request_id": request_id,

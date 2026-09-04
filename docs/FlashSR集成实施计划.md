@@ -103,19 +103,23 @@ python/audio_ai/model_manager.py         （显式断点下载 + SHA-256 校验�
 | 清单解析 | `python/audio_ai/worker.py:353-436`、`models/manifest.json` |
 | 下载与校验 | `python/audio_ai/model_manager.py:206-272` |
 
-### 2.3 在途改动（必须先处理）
+### 2.3 在途改动（阶段 0 已修复）
 
-工作区有未提交改动：`python/audio_ai/worker.py`（+151/−34）、`src-tauri/Cargo.toml`。
+提交 `439fdeb` 中的"分块写盘"重构**未完成**，AudioSR 后端当时跑不通。
+阶段 0 已修复并通过端到端验收，详见 §10.4。
 
-其中"分块写盘"重构**尚未完成**，存在必然触发的缺陷：
+原缺陷清单（已消除，保留供回溯）：
 
-| 位置 | 问题 |
+| 位置（修复前） | 问题 |
 |---|---|
-| `worker.py:1087`、`worker.py:1099` | 调用 `_flush_region(...)`，但仓库内**无该函数定义** → `NameError` |
-| `worker.py:1112` | 调用 `encode_pcm_file(pcm_path, ...)`，但 `pcm_path` **从未赋值** → `NameError` |
+| `worker.py:1095` | `finally:` 缩进为 8（应为 4）→ **整个模块无法解析**，比"运行时缺陷"更严重 |
+| `worker.py:1087`、`1099` | 调用 `_flush_region(...)`，仓库内无此函数定义 → `NameError` |
+| `worker.py:1112` | 调用 `encode_pcm_file(pcm_path, ...)`，`pcm_path` 从未赋值 → `NameError` |
 | `worker.py:1025` | `peak = 0.0` 初始化后从未更新 → `gain` 恒为 1.0、`peak_db` 恒为 −160 dB |
 
-即当前未提交状态下 AudioSR 后端**跑不通**。若不先修复，新模块就没有可对比的基线，也无法判断"FlashSR 更快"到底是模型快还是旧后端崩了。
+修复方式：新增 `PcmChunkWriter`（定稿 PCM 落盘 + 增量峰值统计），
+`enhance()` 改为 `sink.write(...)` / `sink.close()`，并在 `finally` 中
+无条件 `sink.discard()`。该类阶段 2 的 FlashSR Worker 会直接复用。
 
 ---
 
@@ -591,9 +595,9 @@ pub struct BackendModel {
 
 | 阶段 | 状态 | 说明 |
 |---|---|---|
-| 阶段 0：修复在途阻塞缺陷 | **未开始** | 见 10.2 第 1 项，**当前最高优先级** |
-| 阶段 1：环境与依赖 | 基本完成，1 项阻塞 | 不依赖权重的部分已验收；权重前向测试见 10.2 第 2 项 |
-| 阶段 2：Python 模块骨架 | 未开始 | `backend.py` 已落地引导/兼容/加载，协议与编排待写 |
+| 阶段 0：修复在途阻塞缺陷 | **已完成** | 见 10.4；AudioSR 端到端跑通，基线已建立 |
+| 阶段 1：环境与依赖 | 基本完成，1 项阻塞 | 不依赖权重的部分已验收；权重前向测试见 10.2 第 1 项 |
+| 阶段 2：Python 模块骨架 | **下一个** | `backend.py` 已落地引导/兼容/加载，协议与编排待写 |
 | 阶段 3：模型清单与安装器扩展 | 未开始 | 是阶段 1 遗留项的解锁前置 |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
@@ -602,20 +606,7 @@ pub struct BackendModel {
 
 ### 10.2 遗留项清单
 
-**1. 阶段 0 未开始：`python/audio_ai/worker.py` 在途重构有 3 个阻塞缺陷**
-
-已随提交 `439fdeb` 入库，属已知不可用状态：
-
-| 位置 | 问题 | 后果 |
-|---|---|---|
-| `worker.py:1087`、`1099` | 调用 `_flush_region(...)`，全仓库无此函数定义 | `NameError` |
-| `worker.py:1112` | 调用 `encode_pcm_file(pcm_path, ...)`，`pcm_path` 从未赋值 | `NameError` |
-| `worker.py:1025` | `peak = 0.0` 初始化后从未更新 | `gain` 恒为 1.0、`peak_db` 恒为 −160 dB |
-
-**影响**：AudioSR 后端当前跑不通，没有可对比的性能与音质基线，
-"FlashSR 是否更快"无从验证。必须在阶段 6 之前完成。
-
-**2. 阶段 1 阻塞：权重加载与一次前向尚未实测**
+**1. 阶段 1 阻塞：权重加载与一次前向尚未实测**
 
 `python/audio_ai_flashsr/selfcheck.py --weights` 已就绪，但 3.3 GB 权重未下载。
 下载依赖阶段 3（`manifest.json` 的 `files[]` 扩展 + `model_manager.py` 支持多文件）。
@@ -623,7 +614,7 @@ pub struct BackendModel {
 **解锁条件**：阶段 3 完成后立即补跑，把输出形状、耗时、实时倍率、峰值内存
 填入阶段 6 的对比表，并确认 R3 的 `weights_only` 是否真需要回退。
 
-**3. CUDA 路径无法在本机实测（R13）**
+**2. CUDA 路径无法在本机实测（R13）**
 
 本机无 NVIDIA GPU（无 `nvidia-smi`），阶段 1/2 只保障 CPU 正确性。
 CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照常实现，
@@ -647,6 +638,38 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 - 依赖实测：真实只需 8 个包；`wandb`/`tensorboardX`/`psutil` 未触碰；
   `matplotlib`/`sklearn`/`librosa.display` 已打桩屏蔽。
 - 冷启动 4.83 s，超过 `READY_TIMEOUT = 3 s` → **阶段 2 必须延迟导入**（R12、§6 要点 9）。
+
+### 10.4 阶段 0 验收结果（2026-09-04，CPU）
+
+修复 `python/audio_ai/worker.py` 后，用真实 AudioSR 跑通一次 `process` 请求。
+
+**测试条件**：48 kHz 单声道 5.0 s（240000 样本，1 个分块）、
+`device=cpu`、`chunk_seconds=10.24`、`overlap_seconds=1.28`。
+
+**结果**：退出码 0，事件序列 `ready` → `load_model` → `inference` →
+`write_output` → `result`，无 error 事件。
+
+| 指标 | 值 |
+|---|---|
+| `duration_seconds` | 5.0（240000 样本，与输入一致） |
+| `peak_db` | −6.02 dB（修复前恒为 −160 dB） |
+| 输出文件 | 362119 字节，存在且非空 |
+| 输入峰值 → 输出峰值 | 0.800018 → 0.500000 |
+| 输入/输出相关系数 | 0.9912（**非直通**，确认经过模型处理） |
+
+**性能基线（关键）**：
+
+| 阶段 | 累计耗时 | 说明 |
+|---|---|---|
+| `ready` | 1.6 s | |
+| `load_model` 进度上报 | 174.3 s | 其中约 **172 s 是 6.18 GB 权重的 SHA-256** |
+| `inference` 完成 | 335.2 s | 推理约 161 s（DDIM 50 步，约 2.2 s/步） |
+| `result` | 337.1 s | |
+
+> **对阶段 6 的提醒**：端到端耗时中约一半是 `find_model()` 的 SHA-256 校验，
+> 与模型本身无关（FlashSR 3.3 GB 约需 90 s）。对比两个后端时必须**只比较
+> 推理区间**（`load_model` 进度事件到 `inference` 进度事件之间），否则
+> 结论会被权重体积差异污染。
 
 ---
 
