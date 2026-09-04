@@ -1,0 +1,48 @@
+# FlashSR 独立依赖（专用虚拟环境 `.venv-flashsr`，Python 3.10）
+
+**必须与 `requirements-ai.txt` 分环境安装。**
+AudioSR 0.0.7 硬锁 `numpy==1.23.5`；本清单实测解析出 `numpy==2.2.6`。
+两者装进同一个 venv 会互相破坏，这是本模块独立成进程的根本原因之一。
+
+安装步骤见 `python/audio_ai_flashsr/README.md`。
+
+```powershell
+python -m venv .venv-flashsr
+.\.venv-flashsr\Scripts\Activate.ps1
+python -m pip install -r requirements-flashsr.txt
+```
+
+CUDA 版须先按 README 安装对应 CUDA 版本的 torch。
+
+## 推理期真实依赖
+
+以下版本为 2026-09-03 在 Python 3.10 + CPU 环境实测通过的组合。
+
+```
+torch>=2.6,<3        # 2.6 起 torch.load 默认 weights_only=True，见 README「权重加载」
+numpy==2.2.6
+scipy==1.15.3
+soundfile==0.14.0
+librosa==0.11.0      # librosa.filters.mel 被推理使用；librosa.display 已打桩
+einops==0.8.2
+PyYAML==6.0.3
+tqdm==4.70.0
+```
+
+## 不需要安装
+
+`matplotlib` 与 `sklearn` 虽被上游顶层导入，但只服务于训练期绘图，
+`python/audio_ai_flashsr/backend.py` 已为其打桩，详见 README「依赖实测结论」。
+
+上游 `setup.py` 声明的以下 3 项经实测（`sys.modules` 未加载）不在推理路径：
+
+```
+wandb  tensorboardX  psutil
+```
+
+以下 2 项被上游以 `try/except` 可选导入，本项目用 FFmpeg 解码、不调用
+`UtilAudio.read`，无需安装：
+
+```
+torchaudio  pydub
+```

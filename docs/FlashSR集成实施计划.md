@@ -183,7 +183,19 @@ numpy  tqdm  psutil  pyyaml  matplotlib  librosa  wandb  tensorboardX  einops
 
 实际运行还隐含需要：`torch`、`soundfile`、`scipy`（`UtilAudio` 顶层 import）、`torchaudio`（`UtilAudio` 内 try/except 可选 import）。
 
-其中 `wandb`、`tensorboardX`、`psutil`、`matplotlib` 属训练期工具，`librosa`/`einops` 是运行期真实依赖。需在实测后确认哪些模块在 `import FlashSR.FlashSR` 时被真实触碰，未触碰的用 stub 屏蔽（沿用 `audio_ai/worker.py:558-569` 对 matplotlib 的做法）。
+其中 `wandb`、`tensorboardX`、`psutil`、`matplotlib` 属训练期工具，`librosa`/`einops` 是运行期真实依赖。
+
+### 3.4.1 依赖实测结论（阶段 1，2026-09-03，Python 3.10 + torch 2.14.0+cpu）
+
+| 结论 | 内容 |
+|---|---|
+| 推理期真实依赖 | `torch` `numpy` `scipy` `soundfile` `librosa` `einops` `pyyaml` `tqdm` |
+| 上游声明但未加载 | `wandb` `tensorboardX` `psutil` —— 实测 `sys.modules` 中均无，**不需安装** |
+| 可选导入、本项目不用 | `torchaudio` `pydub`（上游 `try/except`；本项目用 FFmpeg 解码，不调用 `UtilAudio.read`） |
+| 绘图依赖 | `matplotlib` / `sklearn` / `librosa.display` —— **全部打桩屏蔽，不需安装** |
+
+绘图依赖的打桩细节、两个踩过的坑（`__spec__` 与 `librosa.display`）以及
+启动耗时数据，见 `python/audio_ai_flashsr/README.md` §3.2、§3.3。
 
 ### 3.5 声道限制
 
@@ -430,14 +442,22 @@ pub struct BackendModel {
 
 ### 阶段 1：环境与依赖
 
-- [ ] 创建 `requirements-flashsr.txt`，先只列 `torch` / `torchaudio` / `soundfile` / `numpy` / `librosa` / `einops` / `scipy` / `pyyaml` / `tqdm`，**暂不列** `wandb` / `tensorboardX` / `psutil` / `matplotlib`。
-- [ ] 建立 `.venv-flashsr`，安装 CPU 版 torch 先验证导入；确认 CUDA 版安装方式并写入 `python/audio_ai_flashsr/README.md`。
-- [ ] 实测：直接 `import FlashSR.FlashSR` 是否触碰 `wandb` / `tensorboardX` / `matplotlib`；触碰的补进依赖，不触碰的从清单中剔除。
-- [ ] 把上游仓库以**固定 commit** 快照方式放入 `python/audio_ai_flashsr/vendor/FlashSR_Inference/`，在 README 中记录 commit 与来源 URL。
-- [ ] 单测脚本：加载 3 个权重 → 对一段 245760 样本随机张量做 1 步前向 → 打印输出形状/耗时/峰值内存（CPU 与 CUDA 各一次）。
-- [ ] 记录 `torch.load` 是否需要 `weights_only=False`（见 R3）。
+- [x] 创建 `requirements-flashsr.txt`：实测后确定为 `torch` `numpy` `scipy` `soundfile` `librosa` `einops` `pyyaml` `tqdm`。
+- [x] 建立 `.venv-flashsr`（Python 3.10），安装 CPU 版 torch 2.14.0+cpu；CUDA 版安装方式已写入 `python/audio_ai_flashsr/README.md` §1.2。
+- [x] 实测依赖触碰情况：`wandb` / `tensorboardX` / `psutil` 未进入 `sys.modules`，已从清单剔除；`matplotlib` / `sklearn` / `librosa.display` 改为打桩屏蔽（见 §3.4.1、README §3.2）。
+- [x] 把上游仓库以固定 commit `2292814a7ef74f61a5479c8d96e653d2f90f369d` 快照到 `python/audio_ai_flashsr/vendor/FlashSR_Inference/`，来源、剔除范围与合规说明见 `vendor/VENDOR.md`。
+- [x] 记录 `torch.load` 的 `weights_only` 行为（见 R3）：默认路径可加载纯张量 `OrderedDict`，已实现带回退的 `backend.load_state_dict()`。
+- [ ] 单测脚本：加载 3 个权重 → 对一段 245760 样本随机张量做 1 步前向 → 打印输出形状/耗时/峰值内存。
+      **阻塞**：脚本 `python/audio_ai_flashsr/selfcheck.py --weights` 已就绪，
+      但 3.3 GB 权重尚未下载（属阶段 3「模型清单与安装器扩展」，需先扩展
+      `manifest.json` 的 `files[]` 与 `model_manager.py`）。建议在阶段 3
+      完成后立即回来补跑，并把实测数据填入阶段 6 的对比表。
 
-> 验收：脱离本项目也能用 `.venv-flashsr` 跑通上游 `Example.py` 的等价流程。
+> 已验收（不依赖权重部分）：`python/audio_ai_flashsr/selfcheck.py` 通过，
+> 依赖齐备、上游导入成功、五个替身全部生效，冷启动 4.83 s。
+>
+> **遗留待验**：权重加载 + 一次前向（等价于上游 `Example.py` 流程），
+> 待阶段 3 装好权重后补跑。
 
 ### 阶段 2：Python 模块骨架（自包含）
 
@@ -509,6 +529,15 @@ pub struct BackendModel {
 6. **模型校验时机**：大模型启动时不算 SHA-256（`STARTUP_HASH_MAX_BYTES = 128 MiB`），否则 Rust 侧 `READY_TIMEOUT = 3 s` 会超时；hash 在 `find_model` 内、加载前必做。
 7. **块长为硬限制**：245760 不接受"稍微超一点"，尾块必须补零而非送入超长张量。
 8. **声道下混**：>2 声道在 FFmpeg 解码阶段 `-ac 2`，并在 `progress.message` 中说明。
+9. **延迟导入（R12，硬性要求）**：`torch` + `FlashSR` 导入实测约 4.8 s，
+   超过 `READY_TIMEOUT = 3 s`。`worker.py` 必须在**模块顶层只导入标准库**，
+   先完成 `available_models()` 并发出 `ready`，收到 `process` 命令后再导入
+   `torch` 与 `FlashSR`。这与 `audio_ai/worker.py:54-55`（顶层即
+   `import torch`）不同，是本模块为满足握手超时而必须的偏离。
+10. **导入期 stdout 拦截**：上游导入会打印 `There is no Hparams`、
+    `import error: torch`、`import error: pydub` 三行到 stdout。
+    `backend.import_flashsr()` 已统一改道到 stderr，不要在它之外单独
+    `import FlashSR.*`。
 
 ---
 
@@ -518,7 +547,7 @@ pub struct BackendModel {
 |---|---|---|---|
 | R1 | `numpy==1.23.5`（AudioSR）与 FlashSR 侧 `torch`/`librosa` 生态冲突 | 同 venv 内两个后端不可共存 | 独立 `.venv-flashsr`（D3）；`requirements-flashsr.txt` 与 `requirements-ai.txt` 严格分离；`AUDIO_AI_FLASHSR_PYTHON` 支持自定义解释器 |
 | R2 | 上游无 PyPI 包，需 vendor 源码 | 仓库体积增大、升级需手工 | 以固定 commit 快照 vendor，README 记录来源与 commit；上游 license 未明确，合规评估前**不要**随安装包分发权重（见 R8） |
-| R3 | `torch.load` 在 torch ≥2.6 默认 `weights_only=True` | 权重加载失败 | 优先 `torch.load(p, map_location=device)`，捕获 `UnpicklingError` 后回退 `weights_only=False`；**不**直接 import 后改全局默认值 |
+| R3 | `torch.load` 在 torch ≥2.6 默认 `weights_only=True` | 权重加载失败 | 优先 `torch.load(p, map_location=device)`，捕获 `UnpicklingError` / `PickleError` 后回退 `weights_only=False`；**不**直接改全局默认值。已实现于 `backend.torch_load_fallback()`（构造期间临时包裹 `torch.load`，`finally` 中恢复 —— 上游 `FlashSR.__init__` 在自己内部调 `torch.load`，无法从外部替换）。实测（torch 2.14.0+cpu）：`OrderedDict[str, Tensor]` 在默认下即可加载；含 numpy 标量时才需要回退。HF 对三个权重的 pickle 扫描结果均在白名单内，**预期走默认路径**，待阶段 6 用真实权重确认 |
 | R4 | 立体声按 batch=2 推理，显存翻倍 | 低端 GPU OOM | 捕获 OOM 后自动降级为逐声道推理（`chunk` 拆成 `[1, T]` 两次调用）并在 `progress.message` 中提示；仍失败则返回 `OUT_OF_MEMORY`（可重试） |
 | R5 | 固定 5.12 s 块长导致块数翻倍 | 抵消部分加速收益 | 一次前向仅 1 步 + 无 WAV 往返，净收益仍显著；若实测不足，再评估 `num_steps` 与 batch 合并策略 |
 | R6 | 3.3 GB 下载，耗时与失败率高 | 用户体验 | 复用现有 Range 分片 + 断点续传 + SHA-256；前端按 `n/3` 汇报文件级进度 |
@@ -526,7 +555,9 @@ pub struct BackendModel {
 | R8 | 上游仓库与权重**未声明 license** | 分发合规风险 | 权重不随应用分发，仅由用户显式下载；`manifest.json` 中 `license` 标注 `unknown`；在 README 与前端提示"第三方模型，许可未明确，仅个人使用" |
 | R9 | 上游 `UtilAudio.read` 断言声道 ∈ {1,2} | >2 声道输入崩溃 | 新 Worker 不调用 `UtilAudio.read`，改用 FFmpeg 解码并 `-ac 2` 下混 |
 | R10 | FlashSR 输出响度/电平与 AudioSR 不一致 | 两档位切换时听感差异 | 统一走增量 peak 归一化（`gain`），并在结果中回传 `peak_db` 便于比对 |
-| R11 | `wandb` / `tensorboardX` 在 import 时被触碰 | 依赖膨胀、启动变慢 | 阶段 1 实测确认；未触碰则用 stub 屏蔽（沿用 `ensure_audiosr_plotting_compatibility` 的模式） |
+| R11 | ~~`wandb` / `tensorboardX` 在 import 时被触碰~~ | 依赖膨胀 | **阶段 1 已实测排除**：两者与 `psutil` 均未进入 `sys.modules`，无需安装，也无需打桩 |
+| R12 | **导入 torch + FlashSR 约 4.8 s，超过 Rust 侧 `READY_TIMEOUT = 3 s`**（`ai_worker.rs:19`） | `audio_quality_check_ai_runtime` 恒返回 `ReadyTimeout`，前端显示"AI 运行时不可用" | **必须延迟导入**：Worker 先发 `ready`，收到 `process` 命令后才导入 `torch` 与 `FlashSR`（见 §6 要点 9）。阶段 4 另需评估是否上调 `READY_TIMEOUT`。已在阶段 1 通过打桩把耗时从约 5.5 s 降到 4.83 s，并消除了 matplotlib 首次构建字体缓存的约 30 s 尖峰 |
+| R13 | 本机无 NVIDIA GPU（无 `nvidia-smi`），阶段 6 无法实测 CUDA | 无法验证 GPU 路径与显存降级（R4） | 阶段 1/2 只保障 CPU 正确；CUDA 路径在 README 中给出安装方式，并在有 GPU 的机器上补测；R4 的 OOM 降级逻辑照常实现，只是无法在本机触发 |
 
 ---
 
@@ -554,9 +585,74 @@ pub struct BackendModel {
 
 ---
 
-**文档版本**：v1.0
+## 10. 遗留与待办（进度快照：2026-09-04）
+
+### 10.1 阶段进度
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| 阶段 0：修复在途阻塞缺陷 | **未开始** | 见 10.2 第 1 项，**当前最高优先级** |
+| 阶段 1：环境与依赖 | 基本完成，1 项阻塞 | 不依赖权重的部分已验收；权重前向测试见 10.2 第 2 项 |
+| 阶段 2：Python 模块骨架 | 未开始 | `backend.py` 已落地引导/兼容/加载，协议与编排待写 |
+| 阶段 3：模型清单与安装器扩展 | 未开始 | 是阶段 1 遗留项的解锁前置 |
+| 阶段 4：Rust 侧接入 | 未开始 | |
+| 阶段 5：前端接入 | 未开始 | |
+| 阶段 6：联调与验收 | 未开始 | |
+| 阶段 7：代码收敛 | 未开始 | |
+
+### 10.2 遗留项清单
+
+**1. 阶段 0 未开始：`python/audio_ai/worker.py` 在途重构有 3 个阻塞缺陷**
+
+已随提交 `439fdeb` 入库，属已知不可用状态：
+
+| 位置 | 问题 | 后果 |
+|---|---|---|
+| `worker.py:1087`、`1099` | 调用 `_flush_region(...)`，全仓库无此函数定义 | `NameError` |
+| `worker.py:1112` | 调用 `encode_pcm_file(pcm_path, ...)`，`pcm_path` 从未赋值 | `NameError` |
+| `worker.py:1025` | `peak = 0.0` 初始化后从未更新 | `gain` 恒为 1.0、`peak_db` 恒为 −160 dB |
+
+**影响**：AudioSR 后端当前跑不通，没有可对比的性能与音质基线，
+"FlashSR 是否更快"无从验证。必须在阶段 6 之前完成。
+
+**2. 阶段 1 阻塞：权重加载与一次前向尚未实测**
+
+`python/audio_ai_flashsr/selfcheck.py --weights` 已就绪，但 3.3 GB 权重未下载。
+下载依赖阶段 3（`manifest.json` 的 `files[]` 扩展 + `model_manager.py` 支持多文件）。
+
+**解锁条件**：阶段 3 完成后立即补跑，把输出形状、耗时、实时倍率、峰值内存
+填入阶段 6 的对比表，并确认 R3 的 `weights_only` 是否真需要回退。
+
+**3. CUDA 路径无法在本机实测（R13）**
+
+本机无 NVIDIA GPU（无 `nvidia-smi`），阶段 1/2 只保障 CPU 正确性。
+CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照常实现，
+但无法在本机触发验证。
+
+**4. 上游 License 未声明（R8）**
+
+上游仓库与权重均未提供 License。处置：权重不随应用分发，仅用户显式下载；
+`manifest.json` 中 `license` 标注 `unknown`；`vendor/VENDOR.md` 与模块 README
+均已写入提示。**正式分发前需完成合规评估。**
+
+**5. 阶段 7 代码收敛未做**
+
+阶段 2 采用"自包含复制"策略，`audio_ai` 与 `audio_ai_flashsr` 会各有一份
+协议/IO/OLA 实现，存在漂移风险。需在 FlashSR 稳定后抽 `python/audio_ai_common/`。
+
+### 10.3 已完成的关键决策与实测（供后续阶段参照）
+
+- 上游快照 commit `2292814a7ef74f61a5479c8d96e653d2f90f369d`，177 文件 / 1.13 MB。
+- 独立环境 `.venv-flashsr`：torch 2.14.0+cpu、numpy 2.2.6（与 AudioSR 的 1.23.5 冲突）。
+- 依赖实测：真实只需 8 个包；`wandb`/`tensorboardX`/`psutil` 未触碰；
+  `matplotlib`/`sklearn`/`librosa.display` 已打桩屏蔽。
+- 冷启动 4.83 s，超过 `READY_TIMEOUT = 3 s` → **阶段 2 必须延迟导入**（R12、§6 要点 9）。
+
+---
+
+**文档版本**：v1.1
 **创建日期**：2026-09-03
-**最后更新**：2026-09-03
+**最后更新**：2026-09-04
 **上游参考**：
 - 论文 https://arxiv.org/abs/2501.10807
 - 代码 https://github.com/jakeoneijk/FlashSR_Inference

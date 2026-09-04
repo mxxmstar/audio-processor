@@ -6,8 +6,13 @@ src-tauri/gen/
 node_modules/
 dist/
 
-# Legacy Python
+# Python 虚拟环境（依赖体积大，不入库）
+# .venv  : 音频识别 + AudioSR（requirements.txt / requirements-ai.txt）
+# .venv-flashsr : FlashSR 专用（requirements-flashsr.txt）
+#                 两者 numpy 版本冲突（1.23.5 vs 2.2.6），必须分环境
 .venv/
+.venv-flashsr/
+# Python 字节码
 __pycache__/
 *.pyc
 
@@ -48,6 +53,10 @@ models/*.ts
 models/*.zip
 models/*.tar.gz
 models/cache/
+# 模型下载临时产物：断点续传分片与合并中间文件（FlashSR 单模型约 3.3 GB）
+models/**/*.part
+models/**/*.parts.*
+models/**/*.merge.part
 bilidown/
 bilidownload/
 
