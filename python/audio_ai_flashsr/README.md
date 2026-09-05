@@ -160,11 +160,58 @@ HF 对三个权重文件的 pickle 扫描结果为
 | 采样率 | `48000` | 输入与输出均固定 |
 | 声道 | 1 或 2 | 上游按 `[B, T]` 处理，立体声即 `batch=2`；>2 声道须在 FFmpeg 解码时下混 |
 | 默认步数 | `num_steps=1` | 一步蒸馏模型，调大无意义且更慢 |
-| 默认低通预处理 | `lowpass_input=True` | 缩小低码率输入与训练数据的分布差异；上游示例用 `False` |
+| 默认低通预处理 | `lowpass_input=False` | 上游 `forward` 默认 `True`，但其官方 `Example.py` 用 `False`。`True` 会走 `UtilAudioLowPassFilter`，存在 Nyquist 陷阱（见实施计划风险 R14），未验证前保持关闭 |
 
 ---
 
-## 5. 上游源码
+## 5. 模块结构与测试
+
+### 5.1 文件职责
+
+| 文件 | 顶层依赖 | 职责 |
+|---|---|---|
+| `protocol.py` | 标准库 | 事件输出、`WorkerFailure`、ffmpeg/ffprobe 定位 |
+| `worker.py` | 标准库 | 主循环、模型清单解析、`ready` 事件 |
+| `pipeline.py` | numpy + torch | 探测/解码、定长分块推理、OLA、编码 |
+| `backend.py` | numpy + torch | 上游引导、导入期打桩、权重加载、单块推理 |
+| `fake_worker.py` | 标准库 | 协议自检假后端，不加载模型 |
+
+`worker.py` 顶层**只导入标准库**，这是 R12 的硬要求：Rust 侧
+`READY_TIMEOUT` 只有 3 秒，而 `numpy`（0.9 s）+ `torch`（5.7 s）远超该值。
+`pipeline` 由 `_load_pipeline()` 在收到 `process` 命令后才导入。
+
+`protocol.py` 单独存在是为了让 `worker` 与 `pipeline` 共用**同一个**
+`WorkerFailure` 类。Rust 以 `python <绝对路径>/worker.py` 启动 Worker，
+没有包上下文；若把协议原语留在 `worker.py`，`pipeline` 的
+`from worker import ...` 会产生第二个 `worker` 模块对象，异常类随之分裂，
+`except WorkerFailure` 将失效、所有错误码退化为 `INFERENCE_FAILED`。
+
+### 5.2 运行测试
+
+```powershell
+# 清单与延迟导入（不需要 torch，任意 Python 均可）
+.\.venv\Scripts\python.exe python/audio_ai_flashsr/test_worker.py
+
+# 全部 44 项（需要 .venv-flashsr）
+cd python/audio_ai_flashsr
+..\..\.venv-flashsr\Scripts\python.exe -m unittest discover -p "test_*.py"
+```
+
+`test_pipeline.py` 用桩替换 `backend` 的模型加载与推理，因此**不需要
+3.3 GB 权重**；探测与解码仍走真实 ffmpeg。
+
+### 5.3 协议自检（无权重、无 GPU）
+
+```powershell
+.\.venv\Scripts\python.exe python/audio_ai_flashsr/fake_worker.py --mode success
+```
+
+支持 `--mode success|slow|error|crash`，用于验证
+`ready` / `progress` / `result` / `error` 四类事件与取消路径。
+
+---
+
+## 6. 上游源码
 
 `vendor/FlashSR_Inference/` 为只读快照，来源、commit、剔除范围与合规说明
 见 [`vendor/VENDOR.md`](vendor/VENDOR.md)。**不要在 vendor 内改代码**，

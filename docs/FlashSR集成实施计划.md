@@ -258,12 +258,16 @@ python/
 └── audio_ai_flashsr/
     ├── __init__.py                 # 包说明
     ├── __main__.py                 # python -m audio_ai_flashsr
-    ├── worker.py                   # 协议主循环 + 任务编排（对齐 audio_ai/worker.py）
-    ├── backend.py                  # FlashSR 加载/缓存/单块推理封装
-    ├── fake_worker.py              # 可选：协议自检用的假后端（与 audio_ai 对齐）
-    ├── requirements-flashsr.txt    # 独立依赖清单
+    ├── protocol.py                 # 协议原语：事件输出、WorkerFailure、二进制定位（仅标准库）
+    ├── worker.py                   # 主循环 + 模型清单解析（仅标准库）
+    ├── pipeline.py                 # 探测/解码/分块推理/OLA/编码（numpy + torch，延迟加载）
+    ├── backend.py                  # 上游引导、导入期兼容、权重加载、单块推理
+    ├── fake_worker.py              # 协议自检用的假后端（与 audio_ai 对齐）
+    ├── test_worker.py              # 清单解析与延迟导入（19 项，不需 torch）
+    ├── test_pipeline.py            # 流水线集成（12 项，桩后端，不需权重）
+    ├── test_backend.py             # 后端契约（13 项）
     ├── vendor/
-    │   └── FlashSR_Inference/      # 上游源码快照（README 中记录 commit）
+    │   └── FlashSR_Inference/      # 上游源码快照（VENDOR.md 中记录 commit）
     │       ├── FlashSR/
     │       └── TorchJaekwon/
     └── README.md                   # 环境搭建与自检步骤
@@ -271,44 +275,85 @@ python/
 requirements-flashsr.txt            # 项目根，便于一键安装（与 requirements-ai.txt 并列）
 ```
 
+> 相比初版规划多出 `protocol.py` 与 `pipeline.py`，原因见 §4.4.0。
+
 ### 4.4 模块文件职责
 
-**`worker.py`**（与 `audio_ai/worker.py` 同构，自包含）
+#### 4.4.0 为什么拆出 `protocol.py` 与 `pipeline.py`（对初版规划的偏离）
+
+初版规划只列了 `worker.py`，实际实现拆成「协议层 / 清单层 / 重量层」三部分，
+原因是 R12 与一个 Python 导入陷阱：
+
+**R12 要求延迟导入，而"延迟"必须能被结构强制。**
+把所有代码放在一个 `worker.py` 里，就只能在函数内部写局部 `import numpy`，
+任何一个误加到顶层的 import 都会静默破坏握手（`ready` 变成 6 秒后才发出）。
+拆成 `pipeline.py` 后约束变成结构的：`worker.py` 顶层根本没有 numpy 可用，
+并且有单元测试（`test_worker.LazyImportTests`，子进程断言
+`torch` / `numpy` 不在 `sys.modules`）守住这条线。
+
+**`protocol.py` 是为了避免 `WorkerFailure` 变成两个类。**
+Rust 以 `python <绝对路径>/worker.py` 启动 Worker，此时没有包上下文。
+若把协议原语留在 `worker.py`，`pipeline.py` 里的 `from worker import ...`
+会**再次导入** `worker.py`，产生与 `__main__` 不同的第二个模块对象 ——
+`WorkerFailure` 随之变成两个类，`worker.py` 中的 `except WorkerFailure`
+将匹配不上 `pipeline` 抛出的异常，所有错误码都会退化为 `INFERENCE_FAILED`。
+把协议原语放进 `protocol.py` 后，两侧都经由 `sys.modules["protocol"]`
+拿到同一个类对象。已用探针验证：`MODEL_NOT_FOUND` 能正确传出（见 §10.5）。
+
+`worker.py` 在**模块顶层**把自身目录加入 `sys.path`，使
+`protocol` / `pipeline` / `backend` 在脚本、`python -m`、被测试导入三种
+启动方式下都能解析。
+
+#### 4.4.1 `worker.py`（主循环 + 清单解析，仅标准库）
 
 | 组成 | 说明 |
 |---|---|
-| `_force_utf8_stdio()` | 原样复制。Windows 区域编码会破坏含日文/汉字的路径 |
-| `emit` / `emit_progress` / `emit_error` / `_read_stdin_line` | 原样复制。stdout 独占 JSONL，日志走 stderr |
-| `probe_audio` / `decode_audio` / `encode_pcm_file` / `run_ffmpeg_with_blocks` | 复用现有 FFmpeg 封装。解码时若 `channels > 2` 强制 `-ac 2` 并记录提示 |
-| `read_manifest` / `find_model` / `available_models` / `sha256_file` | 复用，并**扩展支持 `files[]`**（§4.5） |
-| `choose_device` | 原样复制（`auto` / `cpu` / `cuda`） |
-| `ChunkAssembler` | 原样复制 OLA 累加器（定稿即落盘，长音频不驻留内存） |
-| `enhance()` | 新编排：固定 245760 块长 + 尾块补零 + 立体声按 batch 推理 |
-| `process_in_thread` / `main()` | 原样复制。**必须 `daemon=False`**（`audio_ai/worker.py:1220-1222` 的血泪注释） |
+| `main()` | 发 `ready` → 循环处理 `process` / `cancel` / `shutdown` |
+| `_load_pipeline()` | **延迟导入** `pipeline`，仅在收到 `process` 时调用 |
+| `read_manifest` / `find_model` / `available_models` / `sha256_file` | 与 `audio_ai` 同构，**扩展支持 `files[]`**（§4.5） |
+| `ordered_weights()` | 按名称取权重，不依赖清单声明顺序 |
+| `process_in_thread` | **必须 `daemon=False`**（`audio_ai/worker.py` 的血泪注释） |
+| 清单异常兜底 | 清单解析出错也要发出 `ready` 并把错误放进 `model_errors`，否则 Rust 侧只看到握手超时 |
 
-**`backend.py`**
+#### 4.4.2 `pipeline.py`（numpy + torch，延迟加载）
+
+| 组成 | 说明 |
+|---|---|
+| `probe_audio` / `decode_audio` | 复用 `audio_ai` 的 FFmpeg 封装。声道 > 2 时按 `-ac 2` 下混并上报提示 |
+| `encode_pcm_file` / `run_ffmpeg_with_blocks` | 流式编码，内存中只保留一个块 |
+| `ChunkAssembler` | OLA 累加器，定稿即落盘 |
+| `PcmChunkWriter` | 定稿 PCM 落盘 + **增量峰值统计**（与阶段 0 修复的同名类一致） |
+| `choose_device` | `auto` / `cpu` / `cuda` |
+| `enhance()` | 固定 245760 块长 + 尾块补零 + 立体声按 batch 推理 |
+
+#### 4.4.3 `backend.py`
 
 ```python
 FLASHSR_CHUNK_SAMPLES = 245_760      # 5.12 s @ 48 kHz，模型硬限制
 FLASHSR_SAMPLE_RATE = 48_000
+MAX_CHANNELS = 2                     # 上游按 [B, T]，超过 2 声道未定义
+WEIGHT_NAMES = ("student_ldm", "sr_vocoder", "vae")
 DEFAULT_NUM_STEPS = 1
-DEFAULT_LOWPASS_INPUT = True
+DEFAULT_LOWPASS_INPUT = False        # 见风险 R14；上游 forward 默认 True、其 Example 用 False
 DEFAULT_OVERLAP_SECONDS = 0.5
 
 def bootstrap_vendor_path() -> None          # 把 vendor/FlashSR_Inference 加入 sys.path
-def load_flashsr(paths: FlashSrWeights, device) -> Any   # 构造 + to(device) + eval()
-def cached_flashsr(paths, device) -> Any                 # 线程安全缓存
-def infer_flashsr(model, block: np.ndarray, device,
-                  num_steps: int, lowpass_input: bool) -> np.ndarray
+def ensure_inference_only_imports() -> None  # 为绘图依赖打桩（matplotlib/sklearn/librosa.display）
+def import_flashsr()                          # 导入上游类并拦截其 stdout 噪声
+def torch_load_fallback()                     # 构造期间临时包裹 torch.load（R3）
+def load_flashsr(paths, device) -> Any        # 构造 + to(device) + eval()
+def cached_flashsr(paths, device) -> Any      # 线程安全缓存，键含 device
+def infer_flashsr(model, block, device,
+                  num_steps, lowpass_input) -> np.ndarray
 ```
 
 `infer_flashsr` 契约：
 
 - 入参 `block`：`(channels, 245760)` float32，channels ∈ {1, 2}
 - 转为 `(channels, 245760)` 张量直接送模型（第 0 维即 batch）
-- 出参：同形状 float32；需校验 `isfinite` 且长度一致，否则 `WorkerFailure("OUTPUT_INVALID", …)`
-- 前向必须包在 `contextlib.redirect_stdout(sys.stderr)` 中（stdout 属协议专用）
-- `torch.inference_mode()` + 捕获 `RuntimeError` 中的 `out of memory` → `OUT_OF_MEMORY`
+- 出参：同形状 float32；形状不符或含 NaN/Inf 时抛 `BackendError`
+- 前向包在 `contextlib.redirect_stdout(sys.stderr)` 中（stdout 属协议专用）
+- `torch.inference_mode()` + 捕获 `RuntimeError` 的 `out of memory`
 
 ### 4.5 manifest 扩展：可选 `files[]`
 
@@ -562,6 +607,7 @@ pub struct BackendModel {
 | R11 | ~~`wandb` / `tensorboardX` 在 import 时被触碰~~ | 依赖膨胀 | **阶段 1 已实测排除**：两者与 `psutil` 均未进入 `sys.modules`，无需安装，也无需打桩 |
 | R12 | **导入 torch + FlashSR 约 4.8 s，超过 Rust 侧 `READY_TIMEOUT = 3 s`**（`ai_worker.rs:19`） | `audio_quality_check_ai_runtime` 恒返回 `ReadyTimeout`，前端显示"AI 运行时不可用" | **必须延迟导入**：Worker 先发 `ready`，收到 `process` 命令后才导入 `torch` 与 `FlashSR`（见 §6 要点 9）。阶段 4 另需评估是否上调 `READY_TIMEOUT`。已在阶段 1 通过打桩把耗时从约 5.5 s 降到 4.83 s，并消除了 matplotlib 首次构建字体缓存的约 30 s 尖峰 |
 | R13 | 本机无 NVIDIA GPU（无 `nvidia-smi`），阶段 6 无法实测 CUDA | 无法验证 GPU 路径与显存降级（R4） | 阶段 1/2 只保障 CPU 正确；CUDA 路径在 README 中给出安装方式，并在有 GPU 的机器上补测；R4 的 OOM 降级逻辑照常实现，只是无法在本机触发 |
+| R14 | `lowpass_input=True` 会走 `UtilAudioLowPassFilter.lowpass`，存在与 AudioSR **相同的 Nyquist 陷阱** | 若 `find_cutoff_freq` 返回 24000，`hi = cutoff/nyq = 1.0`，scipy 抛 `Digital filter critical frequencies must be 0 < Wn < 1`；另外 `subsampling` 的 `fs_down` 可能在截止频率极低时退化为 0 | 该路径只在用户显式开启时执行。**默认取 `False`**（上游 `forward` 默认 `True`，但其官方 `Example.py` 用 `False`）。代码位置：`vendor/.../FlashSR/Util/UtilAudioLowPassFilter.py` 第 25 行只防 `cutoff == sr`、第 47 行 `hi = highcutoff_freq / nyq`。若后续要默认开启，需先照 `audio_ai` 的 `patch_audiosr_lowpass_cutoff` 加钳制，并在阶段 6 用真实权重验证 |
 
 ---
 
@@ -597,8 +643,8 @@ pub struct BackendModel {
 |---|---|---|
 | 阶段 0：修复在途阻塞缺陷 | **已完成** | 见 10.4；AudioSR 端到端跑通，基线已建立 |
 | 阶段 1：环境与依赖 | 基本完成，1 项阻塞 | 不依赖权重的部分已验收；权重前向测试见 10.2 第 1 项 |
-| 阶段 2：Python 模块骨架 | **下一个** | `backend.py` 已落地引导/兼容/加载，协议与编排待写 |
-| 阶段 3：模型清单与安装器扩展 | 未开始 | 是阶段 1 遗留项的解锁前置 |
+| 阶段 2：Python 模块骨架 | **已完成** | 见 10.5；44 个测试通过，协议四事件验证通过 |
+| 阶段 3：模型清单与安装器扩展 | **下一个** | 是阶段 1 遗留项（权重前向测试）的解锁前置 |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
 | 阶段 6：联调与验收 | 未开始 | |
@@ -670,6 +716,33 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 > 与模型本身无关（FlashSR 3.3 GB 约需 90 s）。对比两个后端时必须**只比较
 > 推理区间**（`load_model` 进度事件到 `inference` 进度事件之间），否则
 > 结论会被权重体积差异污染。
+
+### 10.5 阶段 2 验收结果（2026-09-05）
+
+**模块结构**：拆为 `protocol.py`（协议原语）/ `worker.py`（主循环 + 清单，
+仅标准库）/ `pipeline.py`（numpy + torch，延迟加载）/ `backend.py`。
+拆分理由见 §4.4.0。
+
+**协议验证**（探针，无权重）：
+
+| 项目 | 结果 |
+|---|---|
+| `ready` 发出耗时 | **0.08 s**（`READY_TIMEOUT` 为 3 s，R12 达标） |
+| `worker` 顶层不导入 torch / numpy | 子进程断言通过，已固化为单测 |
+| `files[]` 清单解析 | 三个权重按 `name` 正确解析 |
+| 错误码传播 | 权重缺失 → `MODEL_NOT_FOUND`，**未**退化为 `INFERENCE_FAILED`（证明 `WorkerFailure` 未被拆成两个类） |
+| `fake_worker` 四事件 | `ready` / `progress` / `result` / `error` 均正确；取消返回 `CANCELLED`，非法命令返回 `INVALID_COMMAND` |
+
+**测试**：44 项全部通过（`test_worker` 19 + `test_pipeline` 12 + `test_backend` 13）。
+其中 `test_pipeline` 用桩后端覆盖：定长分块与尾块补零、重叠淡入淡出、
+3 声道下混、48 kHz 外的采样率拒绝、取消、失败路径不泄漏暂存 PCM。
+
+**阶段 2 期间顺带修复的 `audio_ai` 缺陷**：
+
+`blend[-min(overlap, valid):]` 在 `overlap == 0` 时等于 `blend[0:]`（整个
+数组），与长度为 0 的 `linspace` 相乘抛 `ValueError`。Rust 侧
+`validate_request` 允许 `overlapSeconds == 0`，属可达路径。
+已在 `audio_ai/worker.py` 修复并补回归测试（共 15 项通过）。
 
 ---
 

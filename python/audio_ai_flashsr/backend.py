@@ -12,9 +12,12 @@ import contextlib
 import importlib.machinery
 import io
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import Any, Iterator
+
+import numpy as np
 
 MODULE_ROOT = Path(__file__).resolve().parent
 VENDOR_ROOT = MODULE_ROOT / "vendor" / "FlashSR_Inference"
@@ -24,6 +27,24 @@ FLASHSR_CHUNK_SAMPLES = 245_760
 FLASHSR_SAMPLE_RATE = 48_000
 DEFAULT_NUM_STEPS = 1
 DEFAULT_OVERLAP_SECONDS = 0.5
+
+#: FlashSR 构造函数要求三个权重，顺序固定。清单 `files[]` 中的 `name` 必须
+#: 与之一致；取权重时按名称挑选，不依赖清单声明顺序。
+WEIGHT_NAMES = ("student_ldm", "sr_vocoder", "vae")
+
+#: 上游模型按 `[B, T]` 处理，第 0 维是 batch 而非声道。立体声即 batch=2，
+#: 一次前向同时处理两个声道；超过 2 声道未定义，须在解码阶段下混。
+MAX_CHANNELS = 2
+
+#: `lowpass_input` 默认值。
+#:
+#: 上游 `FlashSR.forward` 的默认值是 `True`，但其官方 `Example.py` 用的是
+#: `False`。该路径存在与 AudioSR 相同的 Nyquist 陷阱：
+#: `UtilAudioLowPassFilter.lowpass` 只在 `cutoff_freq == sr` 时减 1（第 25 行），
+#: 不防 `cutoff_freq == nyq`；而第 47 行 `hi = highcutoff_freq / nyq` 一旦达到
+#: 1.0，scipy 会拒绝（`Digital filter critical frequencies must be 0 < Wn < 1`）。
+#: 在能用真实权重验证之前，沿用上游示例的安全取值。
+DEFAULT_LOWPASS_INPUT = False
 
 
 class BackendError(Exception):
@@ -111,6 +132,72 @@ def load_flashsr(paths: tuple[Path, ...], device: "torch.device") -> Any:
     if not isinstance(model, torch.nn.Module):
         raise BackendError("FlashSR 构造函数未返回 nn.Module")
     return model
+
+
+_CACHE_LOCK = threading.Lock()
+_MODEL_CACHE: dict[tuple[tuple[str, ...], str], Any] = {}
+
+
+def cached_flashsr(paths: tuple[Path, ...], device) -> Any:
+    """按 `(权重路径, 设备)` 缓存已加载的模型。
+
+    Worker 是单任务进程，但 `prepare` 与推理线程可能先后请求同一模型；
+    缓存键带上设备，避免切换 device 后复用错位的权重。
+    """
+    key = (tuple(str(Path(path).resolve()) for path in paths), str(device))
+    with _CACHE_LOCK:
+        model = _MODEL_CACHE.get(key)
+        if model is None:
+            model = load_flashsr(paths, device)
+            _MODEL_CACHE[key] = model
+        return model
+
+
+def infer_flashsr(
+    model: Any,
+    block: np.ndarray,
+    device,
+    num_steps: int = DEFAULT_NUM_STEPS,
+    lowpass_input: bool = DEFAULT_LOWPASS_INPUT,
+) -> np.ndarray:
+    """对一个定长块做一次前向。
+
+    `block` 形状为 `(channels, FLASHSR_CHUNK_SAMPLES)`，channels ∈ {1, 2}。
+    上游把第 0 维当作 batch，因此立体声一次前向即可完成，无需逐声道调用。
+
+    返回与 `block` 同形状的 float32 数组。
+    """
+    import torch
+
+    if block.ndim != 2 or block.shape[0] < 1 or block.shape[0] > MAX_CHANNELS:
+        raise BackendError(f"unsupported block shape: {tuple(block.shape)}")
+    if block.shape[1] != FLASHSR_CHUNK_SAMPLES:
+        raise BackendError(
+            f"FlashSR requires exactly {FLASHSR_CHUNK_SAMPLES} samples, got {block.shape[1]}"
+        )
+
+    tensor = torch.from_numpy(np.ascontiguousarray(block)).to(device)
+    try:
+        # 上游与 diffusers 调度器可能向 stdout 打印，而 stdout 属协议专用。
+        with contextlib.redirect_stdout(sys.stderr), torch.inference_mode():
+            output = model(tensor, num_steps=num_steps, lowpass_input=lowpass_input)
+    except RuntimeError as error:
+        if "out of memory" in str(error).lower():
+            raise BackendError(f"显存不足: {error}") from error
+        raise BackendError(f"推理失败: {error}") from error
+    except Exception as error:  # noqa: BLE001
+        raise BackendError(f"推理失败: {type(error).__name__}: {error}") from error
+
+    if not isinstance(output, torch.Tensor):
+        raise BackendError("FlashSR 输出不是 torch.Tensor")
+    result = output.detach().float().cpu().numpy()
+    if result.shape != block.shape:
+        raise BackendError(
+            f"FlashSR 输出形状 {tuple(result.shape)} 与输入 {tuple(block.shape)} 不一致"
+        )
+    if not np.isfinite(result).all():
+        raise BackendError("FlashSR 输出包含 NaN 或 Inf")
+    return np.ascontiguousarray(result, dtype=np.float32)
 
 
 def bootstrap_vendor_path() -> Path:
