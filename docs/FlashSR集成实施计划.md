@@ -737,18 +737,25 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 其中 `test_pipeline` 用桩后端覆盖：定长分块与尾块补零、重叠淡入淡出、
 3 声道下混、48 kHz 外的采样率拒绝、取消、失败路径不泄漏暂存 PCM。
 
-**阶段 2 期间顺带修复的 `audio_ai` 缺陷**：
+### 10.6 实施过程中发现并修复的缺陷
 
-`blend[-min(overlap, valid):]` 在 `overlap == 0` 时等于 `blend[0:]`（整个
-数组），与长度为 0 的 `linspace` 相乘抛 `ValueError`。Rust 侧
-`validate_request` 允许 `overlapSeconds == 0`，属可达路径。
-已在 `audio_ai/worker.py` 修复并补回归测试（共 15 项通过）。
+阶段 0 修复的在途重构缺陷（含 `finally` 缩进导致的语法错误）见 §2.3、
+验收见 §10.4。下表是**实施阶段 1、2 期间新发现**的缺陷，均已修复。
+
+| # | 缺陷 | 触发条件 | 后果 | 修复 |
+|---|---|---|---|---|
+| D1 | `WorkerFailure` 被拆成两个类 | 协议原语留在 `worker.py`，由 `pipeline` 反查导入 | `except WorkerFailure` 匹配不上，**所有错误码退化为 `INFERENCE_FAILED`**，用户看不到真实原因 | 抽 `protocol.py`，两侧共用 `sys.modules["protocol"]`（§4.4.0） |
+| D2 | `available_models()` 未捕获 `resolve_artifact()` 抛出的 `WorkerFailure` | 清单中出现路径逃逸（如 `../x.pth`） | **Worker 在发出 `ready` 之前崩溃** → Rust 只能看到握手超时，报「AI 运行时不可用」而无具体原因 | `available_models` 逐条目 `try/except`；`main()` 外层再兜底 `WorkerFailure` 与 `OSError` |
+| D3 | `blend[-min(overlap, valid):]` 在 `overlap == 0` 时等于 `blend[0:]`（整个数组），与长度 0 的 `linspace` 相乘抛 `ValueError` | `overlapSeconds == 0`；Rust 侧 `validate_request` 只要求 `0 ≤ overlap < chunk`，**该取值合法** | 任务以 `INFERENCE_FAILED` 失败，日志里只有广播错误，难以定位 | 加 `fade > 0` 守卫；`audio_ai` 与 `audio_ai_flashsr` 均已修复并各补回归测试 |
+| D4 | `lowpass_input=True` 的 Nyquist 陷阱 | `find_cutoff_freq` 返回 24000 时 `hi = cutoff/nyq = 1.0` | scipy 抛 `Digital filter critical frequencies must be 0 < Wn < 1` | 默认取 `False`（上游 `forward` 默认 `True`，但其 `Example.py` 用 `False`）；细节见风险 R14 |
+| D5 | `types.ModuleType` 打桩的模块缺 `__spec__` | 上游内联的 diffusers 用 `importlib.util.find_spec("matplotlib")` 探测依赖 | `ValueError: matplotlib.__spec__ is None` | `_install_stub` 补 `importlib.machinery.ModuleSpec(name, loader=None)` |
+| D6 | 只打桩 `matplotlib` 不够 | `librosa.display` 内部 `from matplotlib import colormaps` | `ImportError: cannot import name 'colormaps' from 'matplotlib'` | `librosa.display` 一并打桩（`librosa` 本体仍是真实依赖）；见模块 README §3.2 |
 
 ---
 
-**文档版本**：v1.1
+**文档版本**：v1.2
 **创建日期**：2026-09-03
-**最后更新**：2026-09-04
+**最后更新**：2026-09-05
 **上游参考**：
 - 论文 https://arxiv.org/abs/2501.10807
 - 代码 https://github.com/jakeoneijk/FlashSR_Inference
