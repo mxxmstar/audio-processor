@@ -531,13 +531,14 @@ pub struct BackendModel {
 
 ### 阶段 4：Rust 侧接入
 
-- [ ] `ai_worker.rs`：新增 `WorkerSpec::flashsr()`，重构 `find_python`。
-- [ ] 新增 `audio_quality/backend.rs`。
-- [ ] `commands/audio_quality.rs`：`select_worker_spec(model_id)`、默认参数分支、48000 Hz 校验、新增 `audio_quality_list_models`、`audio_quality_check_ai_runtime` 增加可选参数。
-- [ ] `lib.rs` 注册新命令。
-- [ ] 补 Rust 单测：backend 路由（含 manifest 解析失败时的前缀回退）、默认分块参数。
+- [x] `ai_worker.rs`：新增 `WorkerSpec::flashsr()` 与 `WorkerSpec::flashsr_fake(mode)`，并新增 `find_python_flashsr()`（优先 `AUDIO_AI_FLASHSR_PYTHON` → `AUDIO_AI_PYTHON` → `.venv-flashsr` → `.venv` 回退）。FlashSR 与 AudioSR 使用**不同**虚拟环境，故不能复用 `production()`。
+- [x] 新增 `audio_quality/backend.rs`：`Backend` 枚举、`resolve_backend`（先读 manifest `backend` 字段，解析失败按 id 前缀回退）、`select_worker_spec(model_id)`（环境变量 `AUDIO_AI_WORKER` → fake → 按后端选真实 Worker）、`BackendDefaults::for_backend`（FlashSR 默认 `chunk_seconds=5.12` / `overlap_seconds=0.5`）、`list_models()`。
+- [x] `commands/audio_quality.rs`：`select_worker_spec(model_id)` 由 `backend` 模块提供；`audio_quality_start` 按后端选默认分块参数并对 FlashSR 做 48000 Hz 输出校验；新增 `audio_quality_list_models`；`audio_quality_check_ai_runtime` 增加 `model_id` 可选参数（决定探测哪个后端）。
+- [x] `lib.rs` 注册 `audio_quality_list_models`；`audio_quality/mod.rs` 声明 `backend` 模块。
+- [x] 补 Rust 单测：backend 路由（精确 + 前缀回退）、默认分块参数、FlashSR 48 kHz 校验、`list_models` 读取 manifest。共 16 项 audio_quality 测试通过，全仓 lib 单测 69 项通过。
 
-> 验收：`audio_quality_list_models` 同时返回 `flashsr` 与 `audiosr-basic` 及各自可用性。
+> 验收：`audio_quality_list_models` 同时返回 `flashsr` 与 `audiosr-basic` 及各自后端；`audio_quality_check_ai_runtime` 传 `model_id=flashsr` 时探测 `.venv-flashsr` 下的独立 Worker；`cargo check` 通过。
+> 注：真实权重就绪前，`flashsr` 在运行时检查中仍以 `MODEL_NOT_FOUND` 呈现（阶段 3 占位符所致），属预期。
 
 ### 阶段 5：前端接入
 
@@ -646,7 +647,8 @@ pub struct BackendModel {
 | 阶段 1：环境与依赖 | 基本完成，1 项阻塞 | 不依赖权重的部分已验收；权重前向测试见 10.2 第 1 项 |
 | 阶段 2：Python 模块骨架 | **已完成** | 见 10.5；44 个测试通过，协议四事件验证通过 |
 | 阶段 3：模型清单与安装器扩展 | **已完成** | 见 §10.7；`model_manager` 支持 `files[]` 多文件下载与续传 |
-| 阶段 4：Rust 侧接入 | **下一个** | `ai_worker.rs` 新增 FlashSR 规格、后端路由、命令与默认参数 |
+| 阶段 4：Rust 侧接入 | **已完成** | 见 §10.8；`cargo check` + 69 项 lib 单测通过 |
+| 阶段 5：前端接入 | **下一个** | 按 §4.9 改造 `QualityView.vue`，调用 `list_models` 与 `check_ai_runtime(modelId)` |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
 | 阶段 6：联调与验收 | 未开始 | |
@@ -773,17 +775,28 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 - 删掉 1 个文件后重跑只续传该文件
 - `files[]` 内路径逃逸被拒
 
+### 10.8 阶段 4 验收结果（2026-09-05）
+
+**后端路由**：`audio_quality/backend.rs` 提供 `resolve_backend` / `select_worker_spec`
+/ `list_models` / `BackendDefaults`。路由优先级：环境变量 `AUDIO_AI_WORKER`
+→ 按 manifest `backend` 字段（解析失败按 id 前缀回退）→ fake。FlashSR 经
+`WorkerSpec::flashsr()` 走 `.venv-flashsr`，AudioSR / DeepFilterNet 经
+`production()` 走 `.venv`。
+
+**命令**：新增 `audio_quality_list_models`；`audio_quality_check_ai_runtime`
+增加 `model_id` 可选参数，可分别探测两个后端；`audio_quality_start` 按后端
+选默认分块参数（FlashSR `chunk_seconds=5.12` / `overlap_seconds=0.5`），
+并对 FlashSR 强制 48 kHz 输出采样率。
+
+**编译与测试**：`cargo check` 通过；audio_quality 单测 16 项通过，全仓 lib
+单测 69 项通过。
+
+> 遗留（预存在、与本次无关）：`src-tauri/src/port_checker/mod.rs` 的 doctest
+> 失败，未在本次改动范围内，未处理。
+
 ---
 
-**文档版本**：v1.3
-**创建日期**：2026-09-03
-**最后更新**：2026-09-05
-**上游参考**：
-- 论文 https://arxiv.org/abs/2501.10807
-- 代码 https://github.com/jakeoneijk/FlashSR_Inference
-- 权重 https://huggingface.co/datasets/jakeoneijk/FlashSR_weights
-
-**文档版本**：v1.2
+**文档版本**：v1.4
 **创建日期**：2026-09-03
 **最后更新**：2026-09-05
 **上游参考**：

@@ -7,6 +7,9 @@ use crate::audio_quality::ai_worker::{
     self, AiProcessRequest, WorkerError, WorkerEvent, WorkerEventCallback, WorkerSpec,
     PROTOCOL_VERSION,
 };
+use crate::audio_quality::backend::{
+    self, Backend, BackendDefaults, FLASHSR_SAMPLE_RATE, ModelInfo,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -130,33 +133,26 @@ pub struct AudioQualityStartInput {
 
 /// 检查 Python AI Worker 是否能启动并完成 JSONL ready 握手。
 ///
-/// `AUDIO_AI_WORKER` 可指定未来打包后的 Worker 可执行文件；未配置时使用
-/// 仓库内 fake Worker，仅用于开发协议验证，并通过 `productionReady=false`
-/// 明确标记其不是实际 AI 模型运行时。
+/// `model_id` 选填，决定探测哪一个后端（FlashSR 用 `.venv-flashsr` 的独立
+/// Worker，AudioSR 用 `.venv` 的 Worker）。`AUDIO_AI_WORKER` 可指定未来
+/// 打包后的 Worker 可执行文件；未配置且 `AUDIO_AI_USE_FAKE=1` 时使用仓库内
+/// fake Worker，仅用于开发协议验证，并通过 `productionReady=false` 明确
+/// 标记其不是实际 AI 模型运行时。
 #[tauri::command]
-pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> {
-    let (spec, worker_kind, production_ready) =
-        if let Some(path) = std::env::var_os("AUDIO_AI_WORKER") {
-            (WorkerSpec::new(path), "configured".to_string(), true)
-        } else if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
-            let Some(spec) = WorkerSpec::fake("success") else {
-                return Ok(unavailable_runtime("找不到 Python 运行时"));
-            };
-            (spec, "fake".to_string(), false)
-        } else {
-            let Some(spec) = WorkerSpec::production() else {
-                return Ok(unavailable_runtime(
-                    "找不到 Python AI Worker 或 Python 运行时",
-                ));
-            };
-            (spec, "python".to_string(), true)
-        };
+pub async fn audio_quality_check_ai_runtime(
+    model_id: Option<String>,
+) -> Result<AiRuntimeCheck, String> {
+    let model_id = model_id.unwrap_or_else(|| "audiosr-basic".into());
+    let Ok((spec, worker_kind)) = backend::select_worker_spec(&model_id) else {
+        return Ok(unavailable_runtime("找不到 Python AI Worker 或 Python 运行时"));
+    };
 
     let program = spec.program.to_string_lossy().into_owned();
+    let is_fake = worker_kind.ends_with("fake");
     match ai_worker::probe_worker(&spec).await {
         Ok(ready) => Ok(AiRuntimeCheck {
             available: true,
-            production_ready: production_ready && !ready.models.is_empty(),
+            production_ready: !is_fake && !ready.models.is_empty(),
             protocol_version: PROTOCOL_VERSION,
             worker_kind,
             program: Some(program),
@@ -177,6 +173,12 @@ pub async fn audio_quality_check_ai_runtime() -> Result<AiRuntimeCheck, String> 
             error: Some(error.to_string()),
         }),
     }
+}
+
+/// 列出 manifest.json 中全部可用模型及其后端，供前端渲染可选模型。
+#[tauri::command]
+pub fn audio_quality_list_models() -> Result<Vec<ModelInfo>, String> {
+    Ok(backend::list_models())
 }
 
 /// 显式下载并校验模型。模型安装不会由音频处理任务自动触发。
@@ -246,26 +248,25 @@ pub fn audio_quality_start(
             .map_err(|e| format!("创建输出目录失败: {}: {e}", parent.display()))?;
     }
 
-    let (spec, worker_kind) = select_worker_spec()?;
+    let model_id = input.model_id.unwrap_or_else(|| "audiosr-basic".into());
+    let backend = backend::resolve_backend(&model_id);
+    // FlashSR 仅支持 48 kHz 输出采样率（模型约束见实施计划 §4.4）。
+    validate_flashsr_sample_rate(backend, input.output_sample_rate)?;
+    let (spec, worker_kind) = backend::select_worker_spec(&model_id)?;
     let id = format!(
         "aq-{}-{}",
         chrono_like_timestamp(),
         NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
     );
-    let model_id = input.model_id.unwrap_or_else(|| "audiosr-basic".into());
-    let (default_chunk_seconds, default_overlap_seconds) = if model_id == "audiosr-basic" {
-        (10.24, 1.28)
-    } else {
-        (20.0, 2.0)
-    };
+    let defaults = BackendDefaults::for_backend(backend);
     let request = AiProcessRequest {
         request_id: id.clone(),
         input_path: input_path.to_string_lossy().into_owned(),
         output_path: output_path.to_string_lossy().into_owned(),
         model_id,
         device: input.device.unwrap_or_else(|| "auto".into()),
-        chunk_seconds: input.chunk_seconds.unwrap_or(default_chunk_seconds),
-        overlap_seconds: input.overlap_seconds.unwrap_or(default_overlap_seconds),
+        chunk_seconds: input.chunk_seconds.unwrap_or(defaults.chunk_seconds),
+        overlap_seconds: input.overlap_seconds.unwrap_or(defaults.overlap_seconds),
         output_sample_rate: input.output_sample_rate.or(Some(48_000)),
     };
     validate_request(&request)?;
@@ -382,18 +383,19 @@ pub fn audio_quality_list_tasks(
     Ok(state.list())
 }
 
-fn select_worker_spec() -> Result<(WorkerSpec, String), String> {
-    if let Some(path) = std::env::var_os("AUDIO_AI_WORKER") {
-        return Ok((WorkerSpec::new(path), "configured".into()));
+/// FlashSR 仅支持 48 kHz 输出采样率（模型硬约束，见实施计划 §4.4）。
+fn validate_flashsr_sample_rate(
+    backend: Backend,
+    output_sample_rate: Option<u32>,
+) -> Result<(), String> {
+    if backend == Backend::FlashSr {
+        if let Some(rate) = output_sample_rate {
+            if rate != FLASHSR_SAMPLE_RATE {
+                return Err(format!("FlashSR 仅支持 {} Hz 输出采样率", FLASHSR_SAMPLE_RATE));
+            }
+        }
     }
-    if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
-        return WorkerSpec::fake("success")
-            .map(|spec| (spec, "fake".into()))
-            .ok_or_else(|| "找不到 Python 运行时，无法启动 fake Worker".into());
-    }
-    WorkerSpec::production()
-        .map(|spec| (spec, "python".into()))
-        .ok_or_else(|| "找不到 Python AI Worker 或 Python 运行时".into())
+    Ok(())
 }
 
 fn validate_request(request: &AiProcessRequest) -> Result<(), String> {
@@ -554,6 +556,38 @@ mod tests {
             output_sample_rate: Some(48_000),
         };
         assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn flashsr_rejects_non_48k_output_sample_rate() {
+        assert!(validate_flashsr_sample_rate(
+            Backend::FlashSr,
+            Some(44_100)
+        )
+        .is_err());
+        assert!(validate_flashsr_sample_rate(Backend::FlashSr, Some(48_000)).is_ok());
+        // 未指定采样率时交给 Python 侧兜底为 48 kHz
+        assert!(validate_flashsr_sample_rate(Backend::FlashSr, None).is_ok());
+        // 其它后端不受该限制
+        assert!(validate_flashsr_sample_rate(Backend::AudioSr, Some(44_100)).is_ok());
+    }
+
+    #[test]
+    fn resolve_backend_routes_flashsr_via_manifest() {
+        // 仓库 manifest.json 含 backend=flashsr 的条目
+        assert_eq!(
+            backend::resolve_backend("flashsr"),
+            Backend::FlashSr
+        );
+        // 未命中时按 id 前缀回退
+        assert_eq!(
+            backend::resolve_backend("flashsr-custom"),
+            Backend::FlashSr
+        );
+        assert_eq!(
+            backend::resolve_backend("audiosr-basic"),
+            Backend::AudioSr
+        );
     }
 
     #[test]

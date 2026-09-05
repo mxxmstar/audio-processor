@@ -56,6 +56,7 @@ pub fn run() {
             commands::audio_quality::audio_quality_download_model,
             commands::audio_quality::audio_quality_start,
             commands::audio_quality::audio_quality_cancel,
+            commands::audio_quality::audio_quality_list_models,
             commands::audio_quality::audio_quality_list_tasks,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,

@@ -4,3 +4,4 @@
 //! 和生命周期验证完成后接入，不在本模块中嵌入 Python 运行时。
 
 pub mod ai_worker;
+pub mod backend;

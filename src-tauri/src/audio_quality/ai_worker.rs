@@ -233,6 +233,45 @@ impl WorkerSpec {
         }
         Some(Self::new(python).arg("-u").arg(script))
     }
+
+    /// FlashSR 处理 Worker。它与 AudioSR 使用**不同的** Python 虚拟环境
+    /// （`.venv-flashsr`，含 FlashSR 的独立依赖），因此不能直接复用
+    /// [`WorkerSpec::production`]。
+    pub fn flashsr() -> Option<Self> {
+        if let Some(path) = std::env::var_os("AUDIO_AI_FLASHSR_WORKER") {
+            return Some(Self::new(path));
+        }
+        let python = find_python_flashsr()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai_flashsr")
+            .join("worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(Self::new(python).arg("-u").arg(script))
+    }
+
+    /// FlashSR 协议自检用的 fake Worker（与 `audio_ai` 的 `fake_worker` 同构）。
+    pub fn flashsr_fake(mode: &str) -> Option<Self> {
+        let python = find_python_flashsr()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai_flashsr")
+            .join("fake_worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(
+            Self::new(python)
+                .arg("-u")
+                .arg(script)
+                .arg("--mode")
+                .arg(mode),
+        )
+    }
 }
 
 /// 已完成的 Worker 运行结果和有限事件记录。
@@ -743,6 +782,33 @@ fn find_python() -> Option<PathBuf> {
         candidates.push(PathBuf::from(path));
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    candidates.push(root.join(".venv").join("Scripts").join("python.exe"));
+    candidates.push(PathBuf::from("python"));
+    candidates.push(PathBuf::from("python3"));
+    candidates.into_iter().find(|candidate| {
+        std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+/// 查找 FlashSR 专用 Python 运行时（`.venv-flashsr`）。
+///
+/// 优先级：`AUDIO_AI_FLASHSR_PYTHON` → `AUDIO_AI_PYTHON` →
+/// `.venv-flashsr/Scripts/python.exe` → `.venv/...`（回退）→ `python` / `python3`。
+fn find_python_flashsr() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("AUDIO_AI_FLASHSR_PYTHON") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("AUDIO_AI_PYTHON") {
+        candidates.push(PathBuf::from(path));
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    candidates.push(root.join(".venv-flashsr").join("Scripts").join("python.exe"));
     candidates.push(root.join(".venv").join("Scripts").join("python.exe"));
     candidates.push(PathBuf::from("python"));
     candidates.push(PathBuf::from("python3"));
