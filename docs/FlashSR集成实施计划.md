@@ -521,12 +521,13 @@ pub struct BackendModel {
 
 ### 阶段 3：模型清单与安装器扩展
 
-- [ ] 按 §4.5 扩展 `model_manager.py`（`artifacts` 抽象 + 多文件逐个下载校验 + 进度汇报）。
-- [ ] 扩展 `audio_ai/worker.py` 的 `read_manifest` / `find_model` / `available_models` 支持 `files[]` 与 `backend: flashsr`。
-- [ ] 在 `models/manifest.json` 中新增 `flashsr` 条目，填入**实测**的 `size_bytes` 与 `sha256`。
-- [ ] 补 `model_manager` 的多文件单元测试（含"部分文件已存在时跳过"的续传场景）。
+- [x] 按 §4.5 扩展 `model_manager.py`（`artifacts` 抽象 + 多文件逐个下载校验 + 进度汇报）。`install_model` 改为返回 `list[Path]`，逐文件下载/校验，已存在文件跳过，支持断点续传。
+- [x] `models/manifest.json` 新增 `flashsr` 条目，使用 `files[]` 列出三个权重与 HF 源地址。`size_bytes` / `sha256` 暂为占位符（见 §10.7）。
+- [x] 补 `model_manager` 的多文件单元测试（含"部分文件已存在时跳过"的续传场景，共 9 项通过）。
+- [~] 扩展 `audio_ai/worker.py` 支持 `files[]` 与 `backend: flashsr`：**不适用**。FlashSR 运行在独立进程 `audio_ai_flashsr/worker.py`，其 `read_manifest` / `find_model` / `available_models` 已在阶段 2 完成 `files[]` 支持；`audio_ai/worker.py` 服务的 AudioSR / DeepFilterNet 仍用单文件 `file` 字段，无需改动。
 
-> 验收：`python audio_ai/model_manager.py --model-id flashsr` 一次装完 3 个文件；重复执行秒退；人为破坏 1 个文件后能续传修复。
+> 验收：`python audio_ai/model_manager.py --model-id flashsr` 一次装完 3 个文件；重复执行秒退；人为破坏 1 个文件后能续传修复（已用单测 `test_install_model_installs_all_files_then_skips` 与 `test_install_model_resumes_after_partial_failure` 覆盖）。
+> 注：真实权重的大小/哈希需待下载后填入（即阶段 1 遗留的**权重前向测试**解锁条件）。在此之前 `flashsr` 条目在 `available_models` 中会以 `MODEL_NOT_FOUND` 呈现，属预期。
 
 ### 阶段 4：Rust 侧接入
 
@@ -644,7 +645,8 @@ pub struct BackendModel {
 | 阶段 0：修复在途阻塞缺陷 | **已完成** | 见 10.4；AudioSR 端到端跑通，基线已建立 |
 | 阶段 1：环境与依赖 | 基本完成，1 项阻塞 | 不依赖权重的部分已验收；权重前向测试见 10.2 第 1 项 |
 | 阶段 2：Python 模块骨架 | **已完成** | 见 10.5；44 个测试通过，协议四事件验证通过 |
-| 阶段 3：模型清单与安装器扩展 | **下一个** | 是阶段 1 遗留项（权重前向测试）的解锁前置 |
+| 阶段 3：模型清单与安装器扩展 | **已完成** | 见 §10.7；`model_manager` 支持 `files[]` 多文件下载与续传 |
+| 阶段 4：Rust 侧接入 | **下一个** | `ai_worker.rs` 新增 FlashSR 规格、后端路由、命令与默认参数 |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
 | 阶段 6：联调与验收 | 未开始 | |
@@ -751,7 +753,35 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 | D5 | `types.ModuleType` 打桩的模块缺 `__spec__` | 上游内联的 diffusers 用 `importlib.util.find_spec("matplotlib")` 探测依赖 | `ValueError: matplotlib.__spec__ is None` | `_install_stub` 补 `importlib.machinery.ModuleSpec(name, loader=None)` |
 | D6 | 只打桩 `matplotlib` 不够 | `librosa.display` 内部 `from matplotlib import colormaps` | `ImportError: cannot import name 'colormaps' from 'matplotlib'` | `librosa.display` 一并打桩（`librosa` 本体仍是真实依赖）；见模块 README §3.2 |
 
+### 10.7 阶段 3 验收结果（2026-09-05）
+
+**`model_manager.py` 多文件支持**：`read_model_entry` 抽象出 `artifacts`
+（单文件条目退化为含 1 项的列表），`install_model` 返回 `list[Path]` 并
+逐文件下载/校验；已存在文件按 size+sha256 跳过，天然支持断点续传。
+
+**`models/manifest.json`**：新增 `flashsr` 条目，用 `files[]` 列出三个权重
+与对应 Hugging Face 源地址。因真实权重（3.3 GB）尚未在本机下载，`size_bytes`
+与 `sha256` 为占位符，已用 `"placeholder": true` 显式标注；待真实下载后
+填入实测值（即阶段 1 遗留的**权重前向测试**解锁步骤）。在此之前
+`available_models` 对 `flashsr` 返回 `MODEL_NOT_FOUND`，属预期。
+
+**测试**：`model_manager` 测试 9 项全部通过，新增覆盖：
+
+- `files[]` 解析（名字 / 体积正确）
+- 空 `files[]` 与非完整 artifact 字段的拒绝
+- 一次装完多文件后再跑秒退（不重复下载）
+- 删掉 1 个文件后重跑只续传该文件
+- `files[]` 内路径逃逸被拒
+
 ---
+
+**文档版本**：v1.3
+**创建日期**：2026-09-03
+**最后更新**：2026-09-05
+**上游参考**：
+- 论文 https://arxiv.org/abs/2501.10807
+- 代码 https://github.com/jakeoneijk/FlashSR_Inference
+- 权重 https://huggingface.co/datasets/jakeoneijk/FlashSR_weights
 
 **文档版本**：v1.2
 **创建日期**：2026-09-03

@@ -21,6 +21,38 @@
       "sha256": "8a3506b9619ed32435ce2c115604750c7bddb5ad8502be7b1a3131bde878aa01",
       "source": "https://huggingface.co/haoheliu/audiosr_basic/resolve/74a47f49061a1e788e968cc43ad45c0b6243f37d/pytorch_model.bin",
       "upstream": "https://github.com/haoheliu/versatile_audio_super_resolution"
+    },
+    {
+      "id": "flashsr",
+      "backend": "flashsr",
+      "version": "2501.10807+5701dea",
+      "file": "cache/flashsr",
+      "placeholder": true,
+      "note": "size_bytes 与 sha256 为占位符，需在权重下载后填入实测值（见实施计划阶段 3）",
+      "files": [
+        {
+          "name": "student_ldm",
+          "file": "cache/flashsr/student_ldm.pth",
+          "size_bytes": 1,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "https://huggingface.co/Plachta/FlashSR/resolve/main/FlashSR/student_ldm.pth"
+        },
+        {
+          "name": "sr_vocoder",
+          "file": "cache/flashsr/sr_vocoder.pth",
+          "size_bytes": 1,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "https://huggingface.co/Plachta/FlashSR/resolve/main/FlashSR/sr_vocoder.pth"
+        },
+        {
+          "name": "vae",
+          "file": "cache/flashsr/vae.pth",
+          "size_bytes": 1,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "https://huggingface.co/Plachta/FlashSR/resolve/main/FlashSR/vae.pth"
+        }
+      ],
+      "upstream": "https://github.com/Plachta/FlashSR"
     }
   ]
 }
