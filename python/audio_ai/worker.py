@@ -1113,14 +1113,15 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
                     )
             valid = actual.shape[1]
             blend = np.ones(valid, dtype=np.float32)
-            if start > 0:
-                blend[: min(overlap, valid)] = np.linspace(
-                    0.0, 1.0, min(overlap, valid), endpoint=False, dtype=np.float32
-                )
-            if end < audio.shape[1]:
-                blend[-min(overlap, valid) :] *= np.linspace(
-                    1.0, 0.0, min(overlap, valid), endpoint=False, dtype=np.float32
-                )
+            # overlap 为 0 时必须整段跳过：blend[-0:] 等于 blend[0:]（整个
+            # 数组），与长度为 0 的 linspace 相乘会抛 broadcast 错误。
+            # Rust 侧 validate_request 允许 overlapSeconds == 0，因此可达。
+            fade = min(overlap, valid)
+            if fade > 0:
+                if start > 0:
+                    blend[:fade] = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
+                if end < audio.shape[1]:
+                    blend[-fade:] *= np.linspace(1.0, 0.0, fade, endpoint=False, dtype=np.float32)
             assembler.add(start, end, predicted, blend)
             # [start, 下一块起点) 不会再被后续分块修改，已定稿 → 立即写盘
             next_start = (

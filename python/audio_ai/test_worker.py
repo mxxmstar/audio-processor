@@ -357,6 +357,45 @@ class ChunkedWriteTests(unittest.TestCase):
         self.assertTrue(output_exists)
         self.assertGreater(output_size, 0)
 
+    def test_enhance_accepts_zero_overlap(self) -> None:
+        """overlapSeconds == 0 是 Rust 侧允许的输入，必须能跑通。
+
+        回归用例：`blend[-min(overlap, valid):]` 在 overlap 为 0 时等于
+        `blend[0:]`（整个数组），与长度为 0 的 linspace 相乘会抛
+        broadcast 错误，导致任务以 INFERENCE_FAILED 失败。
+        """
+        sample_rate = 48_000
+        frames = 24_000
+        audio = np.full((1, frames), 0.4, dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = self._identity_checkpoint(root)
+            output_path = root / "enhanced.flac"
+            request = {
+                "request_id": "test-zero-overlap",
+                "input_path": str(root / "input.wav"),
+                "output_path": str(output_path),
+                "model_id": "identity",
+                "device": "cpu",
+                "chunk_seconds": 0.25,
+                "overlap_seconds": 0.0,
+                "output_sample_rate": sample_rate,
+            }
+            Path(request["input_path"]).write_bytes(b"stub")
+
+            with patch.object(
+                worker, "probe_audio", return_value=(sample_rate, 1, frames / sample_rate)
+            ), patch.object(worker, "decode_audio", return_value=audio), patch.object(
+                worker,
+                "find_model",
+                return_value=(checkpoint, "v", "torchscript", checkpoint, ""),
+            ):
+                result = worker.enhance(request, threading.Event())
+
+        self.assertEqual(result["status"], "completed")
+        self.assertAlmostEqual(result["duration_seconds"], frames / sample_rate, places=6)
+
     def test_enhance_removes_temporary_pcm_on_failure(self) -> None:
         """失败路径同样要清掉暂存 PCM，否则会在系统临时目录堆积。"""
         sample_rate = 48_000
