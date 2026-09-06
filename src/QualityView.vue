@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -42,12 +42,18 @@ interface QualityTask {
   outputDurationSeconds: number | null;
 }
 
+interface ModelInfo {
+  id: string;
+  backend: string;
+}
+
 const inputPath = ref("");
-const modelId = ref("audiosr-basic");
+const modelId = ref("flashsr");
 const device = ref("auto");
 const sampleRate = ref(48000);
 
 const tasks = ref<QualityTask[]>([]);
+const models = ref<ModelInfo[]>([]);
 const runtime = ref<AiRuntimeCheck | null>(null);
 const checking = ref(false);
 const starting = ref(false);
@@ -58,10 +64,48 @@ const running = computed(() =>
   tasks.value.some((t) => t.status === "queued" || t.status === "processing")
 );
 
+// 由后端 `audio_quality_list_models` 驱动可选模型清单，并标注可用性。
+const availableModelIds = computed(() => new Set(runtime.value?.models ?? []));
+
+function backendOf(id: string): string {
+  const found = models.value.find((m) => m.id === id);
+  if (found) return found.backend;
+  if (id.startsWith("flashsr")) return "flashsr";
+  if (id.startsWith("audiosr")) return "audiosr";
+  return "";
+}
+
 const modelOptions = computed(() => {
-  const fromRuntime = runtime.value?.models ?? [];
-  const list = fromRuntime.length ? fromRuntime : [modelId.value];
-  return list.map((m) => ({ label: m, value: m }));
+  const list = models.value.length
+    ? models.value
+    : [{ id: modelId.value, backend: backendOf(modelId.value) }];
+  return list.map((m) => {
+    const backendLabel =
+      m.backend === "flashsr"
+        ? "FlashSR"
+        : m.backend === "audiosr"
+          ? "AudioSR"
+          : m.backend;
+    const available = availableModelIds.value.has(m.id);
+    const desc =
+      m.backend === "flashsr"
+        ? "标准（快）"
+        : m.backend === "audiosr"
+          ? "高保真（慢）"
+          : "";
+    return {
+      label: `${backendLabel} · ${m.id}${available ? " · 可用" : " · 不可用"}`,
+      value: m.id,
+      title: desc,
+    };
+  });
+});
+
+const modelHint = computed(() => {
+  const backend = backendOf(modelId.value);
+  if (backend === "flashsr") return "FlashSR = 标准（快）";
+  if (backend === "audiosr") return "AudioSR = 高保真（慢）";
+  return "";
 });
 
 const deviceOptions = [
@@ -70,10 +114,25 @@ const deviceOptions = [
   { label: "CUDA", value: "cuda" },
 ];
 
-const sampleRateOptions = [
-  { label: "48000 Hz", value: 48000 },
-  { label: "44100 Hz", value: 44100 },
-];
+// FlashSR 与 AudioSR 均只输出 48 kHz，锁定采样率并提示。
+const isFixed48k = computed(() => {
+  const backend = backendOf(modelId.value);
+  return backend === "flashsr" || backend === "audiosr";
+});
+
+const sampleRateOptions = computed(() =>
+  isFixed48k.value
+    ? [{ label: "48000 Hz（模型固定）", value: 48000 }]
+    : [
+        { label: "48000 Hz", value: 48000 },
+        { label: "44100 Hz", value: 44100 },
+      ]
+);
+
+// FlashSR / AudioSR 固定输出 48 kHz，切换模型时锁定采样率。
+watch(isFixed48k, (locked) => {
+  if (locked) sampleRate.value = 48000;
+});
 
 function statusColor(s: string): string {
   switch (s) {
@@ -115,15 +174,28 @@ function fileName(p: string): string {
 async function checkRuntime() {
   checking.value = true;
   try {
-    runtime.value = await invoke<AiRuntimeCheck>("audio_quality_check_ai_runtime");
-    // 运行时可用但无模型时，回退为默认模型，保证仍可发起任务
-    if (runtime.value.models.length && !runtime.value.models.includes(modelId.value)) {
-      modelId.value = runtime.value.models[0];
+    runtime.value = await invoke<AiRuntimeCheck>("audio_quality_check_ai_runtime", {
+      modelId: modelId.value,
+    });
+    const available = runtime.value.models;
+    // 默认优先 FlashSR；当前模型不可用时回退到首个可用模型。
+    // 若连可用模型都没有（仅连上运行时但未安装权重），保留 FlashSR 作为
+    // 选择项，以便用户点击「安装模型」下载权重。
+    if (!available.includes(modelId.value) && available.length) {
+      modelId.value = available[0];
     }
   } catch (e) {
     message.error("检测 AI 运行时失败：" + String(e));
   } finally {
     checking.value = false;
+  }
+}
+
+async function loadModels() {
+  try {
+    models.value = await invoke<ModelInfo[]>("audio_quality_list_models");
+  } catch {
+    models.value = [];
   }
 }
 
@@ -229,7 +301,7 @@ async function openDir(path: string) {
 let off: UnlistenFn | null = null;
 
 onMounted(async () => {
-  await Promise.all([checkRuntime(), loadTasks()]);
+  await Promise.all([loadModels(), checkRuntime(), loadTasks()]);
   off = await listen<QualityTask>("audio-quality-progress", (e) => {
     const t = e.payload;
     const idx = tasks.value.findIndex((x) => x.id === t.id);
@@ -324,21 +396,26 @@ onUnmounted(() => {
         <a-row :gutter="12">
           <a-col :span="8">
             <a-form-item label="模型">
-              <a-space>
-                <a-select
-                  v-model:value="modelId"
-                  :options="modelOptions"
-                  style="min-width: 160px"
-                />
-                <a-button
-                  size="small"
-                  :loading="installing"
-                  :disabled="installing"
-                  @click="installModel"
-                >
-                  <template #icon><DownloadOutlined /></template>
-                  安装模型
-                </a-button>
+              <a-space direction="vertical" :size="4">
+                <a-space>
+                  <a-select
+                    v-model:value="modelId"
+                    :options="modelOptions"
+                    style="min-width: 200px"
+                  />
+                  <a-button
+                    size="small"
+                    :loading="installing"
+                    :disabled="installing"
+                    @click="installModel"
+                  >
+                    <template #icon><DownloadOutlined /></template>
+                    安装模型
+                  </a-button>
+                </a-space>
+                <span v-if="modelHint" style="color: rgba(0, 0, 0, 0.45); font-size: 12px">
+                  {{ modelHint }}（FlashSR 仅支持 48000 Hz 输出）
+                </span>
               </a-space>
             </a-form-item>
           </a-col>
@@ -356,6 +433,7 @@ onUnmounted(() => {
               <a-select
                 v-model:value="sampleRate"
                 :options="sampleRateOptions"
+                :disabled="isFixed48k"
                 style="min-width: 120px"
               />
             </a-form-item>

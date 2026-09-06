@@ -542,10 +542,13 @@ pub struct BackendModel {
 
 ### 阶段 5：前端接入
 
-- [ ] 按 §4.9 改造 `QualityView.vue`。
-- [ ] 模型不可用时，"安装模型"按钮与提示正常工作；安装 3 文件期间给出明确进度文案。
+- [x] 按 §4.9 改造 `QualityView.vue`：`models` 状态由 `audio_quality_list_models` 驱动，`modelOptions` 展示 `[后端] modelId · 可用/不可用`（`modelHint` 给出「标准（快）/高保真（慢）」说明）。
+- [x] 默认 `modelId` 改为 `flashsr`，`checkRuntime` 按当前 modelId 探测其后端；FlashSR 不可用时回退到首个可用模型，否则保留 FlashSR 以便用户点「安装模型」下载权重。
+- [x] 选中 `flashsr` / `audiosr` 时锁定 48000 Hz 输出并禁用下拉（`isFixed48k` + `watch` 自动锁定 + 模板 `:disabled`）。
+- [x] `installModel` 调用 `audio_quality_download_model({ model_id: modelId.value })`，由 Rust 按 manifest `files[]` 展开安装 3 个权重；进度文案沿用既有逻辑。
 
-> 验收：下拉可选两个后端，切换后重新检测；选中 flashsr 时采样率锁定 48 kHz。
+> 验收：`vite build` 通过（3176 模块，无错误）；默认选中 FlashSR；下拉同时列出 FlashSR 与 AudioSR 及各自可用性；切换 FlashSR 后采样率自动锁定 48000 且不可改；点击「安装模型」触发 `audio_quality_download_model(model_id=flashsr)`。`cargo test` 全仓 lib 单测 69 项通过（阶段 4 已含前端所需后端支撑）。
+> 注：真实权重就绪前，FlashSR 在运行时检查中仍显示「不可用」（阶段 3 占位符所致），属预期。
 
 ### 阶段 6：联调与验收
 
@@ -648,7 +651,8 @@ pub struct BackendModel {
 | 阶段 2：Python 模块骨架 | **已完成** | 见 10.5；44 个测试通过，协议四事件验证通过 |
 | 阶段 3：模型清单与安装器扩展 | **已完成** | 见 §10.7；`model_manager` 支持 `files[]` 多文件下载与续传 |
 | 阶段 4：Rust 侧接入 | **已完成** | 见 §10.8；`cargo check` + 69 项 lib 单测通过 |
-| 阶段 5：前端接入 | **下一个** | 按 §4.9 改造 `QualityView.vue`，调用 `list_models` 与 `check_ai_runtime(modelId)` |
+| 阶段 5：前端接入 | **已完成** | 见 §10.9；`vite build` + Rust 69 项单测通过 |
+| 阶段 6：联调与验收 | **下一步（环境受限）** | 真实权重下载 + GPU 前向 + 实测哈希回填 manifest；详见 §10.9 遗留 |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
 | 阶段 6：联调与验收 | 未开始 | |
@@ -794,9 +798,39 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 > 遗留（预存在、与本次无关）：`src-tauri/src/port_checker/mod.rs` 的 doctest
 > 失败，未在本次改动范围内，未处理。
 
+### 10.9 阶段 5 验收结果（2026-09-05）
+
+**前端改造**（`QualityView.vue`）：`modelOptions` 由 `audio_quality_list_models`
+驱动并标注可用性；默认 `modelId = flashsr`，`checkRuntime` 按当前 modelId 探测
+对应后端，不可用时回退首个可用模型；`modelHint` 给出「标准（快）/高保真（慢）」
+说明；`isFixed48k` + `watch` 在选中 FlashSR / AudioSR 时锁定 48 kHz 输出并禁用
+采样率下拉；`installModel` 调用 `audio_quality_download_model({ model_id })`，
+由 Rust 按 manifest `files[]` 展开安装 3 个权重。
+
+**编译**：`vite build` 通过（3176 模块，无错误；仅有既有 chunk 体积告警）。
+
+### 10.10 阶段 6 状态与遗留（2026-09-05）
+
+阶段 6（真实权重联调与验收）**受当前环境限制无法在本机执行**，其依赖项：
+
+1. **真实权重下载（3.3 GB）**：需联网从 Hugging Face 下载三个权重，并在下载后
+   用脚本实测 `size_bytes` 与 `sha256` 回填到 `models/manifest.json` 的 `flashsr`
+   条目（替换 §10.7 中的占位符），并移除 `"placeholder": true`。
+2. **GPU / 大模型前向验证**：在 CUDA 上跑一次真实前向，确认 48 kHz 输出、小步
+   重叠 OLA 正常、修复 Nyquist 陷阱，并与 AudioSR 做质量/耗时对比。
+3. **CPU 性能基线（可选）**：在 CPU 上量化单文件耗时，挑选 `num_steps` / `overlap_seconds`。
+4. **低采样率输入上采样策略**：当前 `pipeline.enhance` 已按输入 `sr` 选择 resampy
+   FFT 方法、先把输入重采样到 48 kHz 再进入 512× 上采样器，逻辑已就位；真实联调时
+   用 44.1 kHz 输入验证主观质量。
+5. **文档更新**：真实权重可用后，更新 `python/audio_ai_flashsr/README.md` 与
+   主 `README.md` 的 FlashSR 安装/运行说明。
+
+> 上述步骤需在具备 GPU / 联网的环境中由人工触发；本仓库代码侧（阶段 0–5）均已
+> 就位并通过编译与单测。
+
 ---
 
-**文档版本**：v1.4
+**文档版本**：v1.5
 **创建日期**：2026-09-03
 **最后更新**：2026-09-05
 **上游参考**：
