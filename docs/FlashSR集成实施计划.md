@@ -552,7 +552,8 @@ pub struct BackendModel {
 
 ### 阶段 6：联调与验收
 
-- [ ] 同一段 3 分钟立体声，分别用 `flashsr` 与 `audiosr-basic` 跑通（CPU 一次、CUDA 一次）。
+- [x] **fake worker 端到端协议冒烟**（无需真实权重）：新增 `flashsr_fake_worker_*` 集成测试，验证 FlashSR 独立 Worker（`.venv-flashsr` + `audio_ai_flashsr/fake_worker.py`）经 Rust `probe_worker` / `run_worker` 完整跑通 ready→progress→result / error 路径。`cargo test --lib` 72 项全绿（阶段 5 为 69 项）。
+- [ ] **真实权重联调（环境受限，未在本机执行）**：需联网下载 3.3 GB 权重并回填 manifest 实测哈希，在 GPU 上跑一次真实前向。详见 §10.10。
 - [ ] 记录并回填实测数据：
 
 | 指标 | audiosr-basic | flashsr |
@@ -652,7 +653,7 @@ pub struct BackendModel {
 | 阶段 3：模型清单与安装器扩展 | **已完成** | 见 §10.7；`model_manager` 支持 `files[]` 多文件下载与续传 |
 | 阶段 4：Rust 侧接入 | **已完成** | 见 §10.8；`cargo check` + 69 项 lib 单测通过 |
 | 阶段 5：前端接入 | **已完成** | 见 §10.9；`vite build` + Rust 69 项单测通过 |
-| 阶段 6：联调与验收 | **下一步（环境受限）** | 真实权重下载 + GPU 前向 + 实测哈希回填 manifest；详见 §10.9 遗留 |
+| 阶段 6：联调与验收 | **部分完成（fake 联调已验证，真实权重待 GPU/联网环境）** | fake worker 端到端协议冒烟通过；真实权重下载 + GPU 前向 + 实测哈希回填 manifest 待环境 |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
 | 阶段 6：联调与验收 | 未开始 | |
@@ -826,7 +827,10 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
    主 `README.md` 的 FlashSR 安装/运行说明。
 
 > 上述步骤需在具备 GPU / 联网的环境中由人工触发；本仓库代码侧（阶段 0–5）均已
-> 就位并通过编译与单测。
+> 就位并通过编译与单测。阶段 6 中"fake worker 端到端协议冒烟"已在本机完成
+> （`flashsr_fake_worker_*` 三项集成测试通过，`cargo test --lib` 共 72 项全绿），
+> 证明 Rust 与 FlashSR 独立 Worker（`.venv-flashsr` + `audio_ai_flashsr`）的
+> JSONL 协议全链路打通，仅缺真实权重与 GPU 即可做质量验收。
 
 ---
 

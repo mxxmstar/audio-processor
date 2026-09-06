@@ -977,4 +977,58 @@ mod tests {
         let stderr = "Running DDIM Sampling with 50 timesteps\rDDIM Sampler: 100%|████| 50/50 [00:30<00:00, 1.61it/s]";
         assert_eq!(strip_progress_noise(stderr), "");
     }
+
+    // ---- FlashSR 独立 Worker（`.venv-flashsr` + `audio_ai_flashsr/fake_worker.py`）----
+    // 这些测试证明 FlashSR 专用运行时与 Rust 协议全链路打通，无需真实权重。
+
+    #[tokio::test]
+    async fn flashsr_fake_worker_ready_probe() {
+        let Some(spec) = WorkerSpec::flashsr_fake("success") else {
+            eprintln!("skip: FlashSR python runtime unavailable");
+            return;
+        };
+        let ready = probe_worker(&spec).await.unwrap();
+        assert_eq!(ready.worker_version, "fake-flashsr-0.1.0");
+        assert_eq!(ready.models, vec!["flashsr"]);
+    }
+
+    #[tokio::test]
+    async fn flashsr_fake_worker_success_round_trip() {
+        let Some(spec) = WorkerSpec::flashsr_fake("success") else {
+            eprintln!("skip: FlashSR python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let output = dir.join("output.flac.part");
+        let request = AiProcessRequest::new("test-flashsr-success", Path::new("input.m4a"), &output);
+        let run = run_worker(&spec, &request, None).await.unwrap();
+
+        assert_eq!(run.result.output_path, output.to_string_lossy());
+        assert!(run
+            .events
+            .iter()
+            .any(|event| matches!(event, WorkerEvent::Ready { models, .. } if models.contains(&"flashsr".to_string()))));
+        assert!(run
+            .events
+            .iter()
+            .any(|event| matches!(event, WorkerEvent::Progress { .. })));
+        assert!(output.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn flashsr_fake_worker_error_is_returned() {
+        let Some(spec) = WorkerSpec::flashsr_fake("error") else {
+            eprintln!("skip: FlashSR python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let request =
+            AiProcessRequest::new("test-flashsr-error", Path::new("input.m4a"), &dir.join("out"));
+        let error = run_worker(&spec, &request, None).await.unwrap_err();
+        assert!(
+            matches!(error, WorkerError::Remote { ref code, .. } if code == "INFERENCE_FAILED")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
