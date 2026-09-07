@@ -150,8 +150,10 @@ def read_manifest(model_dir: Path) -> dict[str, dict[str, Any]] | None:
                 raise ValueError("model entry must be an object")
             model_id = str(entry["id"])
             backend = str(entry.get("backend", "torchscript"))
+            # 共享 manifest 含其它后端的条目（如 audiosr / deepfilternet）；
+            # 本 Worker 只收录自己支持的后端，其余跳过，避免整份清单被拒。
             if backend not in SUPPORTED_BACKENDS:
-                raise ValueError(f"unsupported model backend: {backend}")
+                continue
             result[model_id] = {
                 "file": str(entry["file"]),
                 "version": str(entry.get("version", "unknown")),
@@ -350,6 +352,15 @@ def main() -> int:
                     ),
                 )
                 continue
+            # 必须在主线程预热上游导入：它会经 joblib → loky 拉起
+            # multiprocessing 的 resource tracker，若在推理线程内导入而主线程
+            # 阻塞于 stdin 读取，会死锁（stdin 为管道时必现，见
+            # pipeline.warm_up_imports 的说明）。预热失败不致命，交给线程内
+            # 的常规错误处理路径上报。
+            try:
+                pipeline.warm_up_imports()
+            except Exception as error:  # noqa: BLE001
+                log(f"warm-up import failed: {type(error).__name__}: {error}")
             cancel_event.clear()
             # 必须用非守护线程：主线程一旦退出，守护线程会被立即杀死，
             # 正在写回的结果 / 错误事件会随之丢失，表现为「进程异常退出、
@@ -364,14 +375,33 @@ def main() -> int:
             cancel_event.set()
         elif command == "shutdown":
             cancel_event.set()
-            if active_thread and active_thread.is_alive():
-                active_thread.join(timeout=1.0)
+            _join_active_thread(active_thread)
             return 0
         else:
             emit_error(
                 request_id, WorkerFailure("INVALID_COMMAND", f"unsupported command: {command}")
             )
+    # EOF：必须等待在途任务完成再返回。否则主线程先退出会让解释器开始关闭
+    # （threading._shutdown 置 _SHUTTING_DOWN=True），仍在运行的推理线程内
+    # 懒加载上游时，`joblib → loky → concurrent.futures.process` 会在导入期
+    # 调用 threading._register_atexit() 并抛
+    # "can't register atexit after shutdown"（阶段 6 实测）。
+    _join_active_thread(active_thread)
     return 0
+
+
+def _join_active_thread(active_thread: threading.Thread | None) -> None:
+    """等待在途推理线程结束，避免解释器在其运行期间进入关闭流程。"""
+    if active_thread is None:
+        return
+    if not active_thread.is_alive():
+        return
+    # 该线程是非守护线程，Python 原本也会在 _shutdown 中等待它；这里提前
+    # join 只是为了让它在 _SHUTTING_DOWN 置位之前跑完。超时仅作兜底，避免
+    # 极端情况下进程永久挂住。
+    active_thread.join(timeout=3600.0)
+    if active_thread.is_alive():
+        log("timed out waiting for the in-flight task to finish")
 
 
 if __name__ == "__main__":

@@ -553,7 +553,7 @@ pub struct BackendModel {
 ### 阶段 6：联调与验收
 
 - [x] **fake worker 端到端协议冒烟**（无需真实权重）：新增 `flashsr_fake_worker_*` 集成测试，验证 FlashSR 独立 Worker（`.venv-flashsr` + `audio_ai_flashsr/fake_worker.py`）经 Rust `probe_worker` / `run_worker` 完整跑通 ready→progress→result / error 路径。`cargo test --lib` 72 项全绿（阶段 5 为 69 项）。
-- [ ] **真实权重联调（环境受限，未在本机执行）**：需联网下载 3.3 GB 权重并回填 manifest 实测哈希，在 GPU 上跑一次真实前向。详见 §10.10。
+- [x] **真实权重联调**：用 aria2 下载 3.3 GB 权重，回填 manifest 实测 `size_bytes`/`sha256`（并修正三处权重源地址）；CPU 上跑通真实前向（48 kHz / 2ch / peak_db −20.43，0.20x 实时）；Rust 集成测试 `flashsr_real_worker_forward_pass` 通过（100 s）。实测共暴露并修复 6 个真实缺陷 D7–D12，详见 §10.10。
 - [ ] 记录并回填实测数据：
 
 | 指标 | audiosr-basic | flashsr |
@@ -653,7 +653,7 @@ pub struct BackendModel {
 | 阶段 3：模型清单与安装器扩展 | **已完成** | 见 §10.7；`model_manager` 支持 `files[]` 多文件下载与续传 |
 | 阶段 4：Rust 侧接入 | **已完成** | 见 §10.8；`cargo check` + 69 项 lib 单测通过 |
 | 阶段 5：前端接入 | **已完成** | 见 §10.9；`vite build` + Rust 69 项单测通过 |
-| 阶段 6：联调与验收 | **部分完成（fake 联调已验证，真实权重待 GPU/联网环境）** | fake worker 端到端协议冒烟通过；真实权重下载 + GPU 前向 + 实测哈希回填 manifest 待环境 |
+| 阶段 6：联调与验收 | **已完成（真实权重已下载并在 CPU 跑通前向）** | 见 §10.10；含 6 个真实缺陷 D7–D12 的修复；GPU 质量对比与 44.1 kHz 主观验收为遗留 |
 | 阶段 4：Rust 侧接入 | 未开始 | |
 | 阶段 5：前端接入 | 未开始 | |
 | 阶段 6：联调与验收 | 未开始 | |
@@ -810,33 +810,61 @@ CUDA 安装方式已写入模块 README §1.2；R4 的显存 OOM 降级逻辑照
 
 **编译**：`vite build` 通过（3176 模块，无错误；仅有既有 chunk 体积告警）。
 
-### 10.10 阶段 6 状态与遗留（2026-09-05）
+### 10.10 阶段 6 真实权重联调结果（2026-09-06）
 
-阶段 6（真实权重联调与验收）**受当前环境限制无法在本机执行**，其依赖项：
+**权重已用 aria2 下载并回填实测哈希**（`models/manifest.json` 的 `flashsr` 条目，
+占位符已移除）：
 
-1. **真实权重下载（3.3 GB）**：需联网从 Hugging Face 下载三个权重，并在下载后
-   用脚本实测 `size_bytes` 与 `sha256` 回填到 `models/manifest.json` 的 `flashsr`
-   条目（替换 §10.7 中的占位符），并移除 `"placeholder": true`。
-2. **GPU / 大模型前向验证**：在 CUDA 上跑一次真实前向，确认 48 kHz 输出、小步
-   重叠 OLA 正常、修复 Nyquist 陷阱，并与 AudioSR 做质量/耗时对比。
-3. **CPU 性能基线（可选）**：在 CPU 上量化单文件耗时，挑选 `num_steps` / `overlap_seconds`。
-4. **低采样率输入上采样策略**：当前 `pipeline.enhance` 已按输入 `sr` 选择 resampy
-   FFT 方法、先把输入重采样到 48 kHz 再进入 512× 上采样器，逻辑已就位；真实联调时
-   用 44.1 kHz 输入验证主观质量。
-5. **文档更新**：真实权重可用后，更新 `python/audio_ai_flashsr/README.md` 与
-   主 `README.md` 的 FlashSR 安装/运行说明。
+| 文件 | size_bytes | sha256（前 16 位） |
+|---|---:|---|
+| `student_ldm.pth` | 1033200174 | `f5c373b8748327d6` |
+| `sr_vocoder.pth` | 627861067 | `3c3f030afc1cbf5d` |
+| `vae.pth` | 1655458345 | `7dbbea1f52832625` |
 
-> 上述步骤需在具备 GPU / 联网的环境中由人工触发；本仓库代码侧（阶段 0–5）均已
-> 就位并通过编译与单测。阶段 6 中"fake worker 端到端协议冒烟"已在本机完成
-> （`flashsr_fake_worker_*` 三项集成测试通过，`cargo test --lib` 共 72 项全绿），
-> 证明 Rust 与 FlashSR 独立 Worker（`.venv-flashsr` + `audio_ai_flashsr`）的
-> JSONL 协议全链路打通，仅缺真实权重与 GPU 即可做质量验收。
+同时修正了三处权重源地址：应为
+`https://huggingface.co/datasets/jakeoneijk/FlashSR_weights/resolve/main/<name>`，
+而非原先误填的 `Plachta/FlashSR/...`。
+
+**真实前向已跑通**（CPU，6 秒 48 kHz 立体声测试音调）：
+
+```
+progress  inference  50%  (5.12s / 6.0s)
+progress  inference  90%  (6.0s  / 6.0s)
+progress  write_output 95%
+result    status=completed  sample_rate=48000  channels=2
+          duration_seconds=6.0  peak_db=-20.43
+```
+
+- 权重加载 7.70 s；单块（245760 样本 / 5.12 s）前向约 25.6 s，**CPU 实时速度 0.20x**
+  （5 倍于实时，即 3 分钟音频约需 15 分钟）。
+- `peak_db=-20.43` 说明峰值统计与增益归一化链路正常（非 −160 dB）。
+- Rust 侧 `flashsr_real_worker_forward_pass`（`#[ignore]`，`cargo test --ignored`）
+  通过，耗时 100 s，证明 Rust↔FlashSR 的 JSONL 全链路在真实权重下可用。
+
+**阶段 6 实测暴露并修复的 6 个真实缺陷**（均已补测试或已验证）：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| D7 | 两个 Worker 启动时报 `unsupported model backend: ...` | 共享 `manifest.json` 含其它后端条目，原逻辑**整份拒绝**；引入 flashsr 会同时**破坏既有 AudioSR / DeepFilterNet** | `read_manifest` 改为**跳过**不支持的后端（两个 Worker 都改） |
+| D8 | 权重加载卡死/报错 `can't deserialize on a CUDA device` | 权重以 CUDA 张量保存，CPU 上缺 `map_location` | `torch_load_fallback` 在 CUDA 不可用时自动注入 `map_location=torch.device("cpu")` |
+| D9 | 推理线程内报 `RuntimeError: can't register atexit after shutdown` | 主线程 stdin EOF 后先返回，解释器置 `_SHUTTING_DOWN`，线程内才懒加载 `joblib→loky→concurrent.futures.process` | 主循环 EOF / `shutdown` 时先 `_join_active_thread()`（两个 Worker 都改） |
+| D10 | 编码阶段 `PermissionError WinError 32`，暂存 PCM 删不掉 | `blocks()` 是惰性生成器，文件句柄开在生成器内；ffmpeg 提前退出时生成器未耗尽 → 句柄不释放 | `encode_pcm_file` 用 `try/finally: generator.close()` |
+| D11 | `ENCODE_FAILED: Unable to choose an output format` | Rust 侧输出路径为 `*.flac.part`，ffmpeg 无法从 `.part` 推断**容器**；只传了 `-c:a` | `ffmpeg_encode_command` 显式加 `-f <容器>`（flac / wav 映射） |
+| D12 | **stdin 为管道时**（生产常态）发出 `load_model` 后再无事件，Rust 永远等不到 result | `import_flashsr()` 经 `joblib→loky` 拉起 multiprocessing resource tracker；在推理线程内导入而主线程阻塞于 stdin 读取时死锁 | 新增 `pipeline.warm_up_imports()`，在**主线程**处理 `process` 时先预热上游导入 |
+
+> D12 尤为关键：仅在"stdin 是管道"时复现，而文件 stdin（一次性 EOF）的场景正常，
+> 因此只有复现生产形态才能发现。已用「写命令后 stdin 保持打开 240 秒」的 cmd
+> 脚本验证修复前必挂、修复后 100 s 完成。
+
+**遗留**：GPU 上的质量/耗时对比（与 AudioSR）与 44.1 kHz 输入的主观验收仍待
+具备 GPU 的环境执行；`num_steps` / `overlap_seconds` 的 CPU 参数挑选可基于
+0.20x 的实测基线继续。
 
 ---
 
-**文档版本**：v1.5
+**文档版本**：v1.6
 **创建日期**：2026-09-03
-**最后更新**：2026-09-05
+**最后更新**：2026-09-06
 **上游参考**：
 - 论文 https://arxiv.org/abs/2501.10807
 - 代码 https://github.com/jakeoneijk/FlashSR_Inference

@@ -367,8 +367,11 @@ def read_manifest(model_dir: Path) -> dict[str, dict[str, str]] | None:
                 raise ValueError("model entry must be an object")
             model_id = str(entry["id"])
             backend = str(entry.get("backend", "torchscript"))
+            # 共享 manifest 可能含其它后端的条目（如 flashsr）；本 Worker 只
+            # 收录自己支持的后端，其余跳过，避免整份清单被拒（否则会破坏
+            # 既有 AudioSR / DeepFilterNet 功能）。
             if backend not in {"torchscript", "deepfilternet", "audiosr"}:
-                raise ValueError(f"unsupported model backend: {backend}")
+                continue
             parsed = {
                 "file": str(entry["file"]),
                 "version": str(entry.get("version", "unknown")),
@@ -1280,12 +1283,24 @@ def main() -> int:
             cancel_event.set()
         elif command == "shutdown":
             cancel_event.set()
-            if active_thread and active_thread.is_alive():
-                active_thread.join(timeout=1.0)
+            _join_active_thread(active_thread)
             return 0
         else:
             emit_error(request_id, WorkerFailure("INVALID_COMMAND", f"unsupported command: {command}"))
+    # EOF：必须等待在途任务完成再返回，否则主线程先退出会让解释器进入关闭
+    # 流程（threading 置 _SHUTTING_DOWN），仍在运行的推理线程内懒加载
+    # 重量级模块时可能失败。
+    _join_active_thread(active_thread)
     return 0
+
+
+def _join_active_thread(active_thread: threading.Thread | None) -> None:
+    """等待在途推理线程结束，避免解释器在其运行期间进入关闭流程。"""
+    if active_thread is None or not active_thread.is_alive():
+        return
+    # 该线程是非守护线程，Python 原本也会在 _shutdown 中等待它；提前 join
+    # 只是为了让它在 _SHUTTING_DOWN 置位之前跑完。
+    active_thread.join(timeout=3600.0)
 
 
 if __name__ == "__main__":

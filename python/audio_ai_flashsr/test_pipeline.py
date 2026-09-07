@@ -267,6 +267,40 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(created[0].exists())
 
 
+class EncodeCommandTests(unittest.TestCase):
+    """输出路径以 `.part` 结尾时的编码命令（Rust 侧先写临时文件再改名）。"""
+
+    def test_codec_strips_part_suffix(self) -> None:
+        self.assertEqual(pipeline.codec_for_output("out.flac.part"), "flac")
+        self.assertEqual(pipeline.codec_for_output("out.wav.part"), "pcm_s16le")
+        self.assertEqual(pipeline.codec_for_output("out.flac"), "flac")
+
+    def test_unsupported_output_is_rejected(self) -> None:
+        with self.assertRaises(WorkerFailure):
+            pipeline.codec_for_output("out.mp3")
+
+    def test_part_output_forces_container_format(self) -> None:
+        # `.part` 后缀让 ffmpeg 无法从扩展名推断容器，必须显式 `-f`，
+        # 否则报 "Unable to choose an output format"（阶段 6 实测）。
+        command = pipeline.ffmpeg_encode_command(
+            "out.flac.part", 48_000, 2, pipeline.codec_for_output("out.flac.part")
+        )
+        self.assertIn("-f", command)
+        self.assertIn("flac", command)
+        self.assertIn("out.flac.part", command)
+        # `-c:a` 与 `-f` 必须都在，且 `-f` 出现在输出路径之前
+        codec_index = command.index("-c:a")
+        format_index = command.index("-f", codec_index + 1)
+        self.assertLess(format_index, len(command) - 1)
+
+    def test_wav_output_forces_wav_container(self) -> None:
+        command = pipeline.ffmpeg_encode_command(
+            "out.wav.part", 48_000, 2, pipeline.codec_for_output("out.wav.part")
+        )
+        self.assertIn("pcm_s16le", command)
+        self.assertIn("wav", command)
+
+
 class ChunkAssemblerTests(unittest.TestCase):
     def test_overlapping_regions_average_by_weight(self) -> None:
         assembler = pipeline.ChunkAssembler(channels=1)

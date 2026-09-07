@@ -130,6 +130,11 @@ def codec_for_output(output_path: str) -> str:
     raise WorkerFailure("UNSUPPORTED_OUTPUT", "AI master output must be WAV or FLAC")
 
 
+# 音频编码器 → 容器格式。Rust 侧先把结果写成 `xxx.flac.part` 再改名，
+# `.part` 后缀让 ffmpeg 无法推断容器，因此必须显式传 `-f`。
+_CONTAINER_FORMATS = {"flac": "flac", "pcm_s16le": "wav"}
+
+
 def ffmpeg_encode_command(
     output_path: str, sample_rate: int, channels: int, codec: str
 ) -> list[str]:
@@ -148,6 +153,8 @@ def ffmpeg_encode_command(
         "pipe:0",
         "-c:a",
         codec,
+        "-f",
+        _CONTAINER_FORMATS.get(codec, codec),
         output_path,
     ]
 
@@ -211,10 +218,21 @@ def encode_pcm_file(
                     block = (block * gain).astype(np.float32)
                 yield block
 
-    run_ffmpeg_with_blocks(
-        ffmpeg_encode_command(output_path, sample_rate, channels, codec_for_output(output_path)),
-        blocks(),
-    )
+    # `blocks()` 是惰性生成器，文件句柄开在生成器内部。若 ffmpeg 提前退出
+    # 或循环提前结束，生成器不会被耗尽，`with open(...)` 就不会执行，句柄
+    # 一直挂着 —— 随后删除暂存 PCM 会在 Windows 上报
+    # PermissionError(WinError 32)「文件正被占用」（阶段 6 实测）。
+    # 因此必须显式 close()，强迫生成器在 yield 处抛 GeneratorExit 并释放句柄。
+    generator = blocks()
+    try:
+        run_ffmpeg_with_blocks(
+            ffmpeg_encode_command(
+                output_path, sample_rate, channels, codec_for_output(output_path)
+            ),
+            generator,
+        )
+    finally:
+        generator.close()
 
 
 # --------------------------------------------------------------------------
@@ -320,6 +338,20 @@ class PcmChunkWriter:
 # --------------------------------------------------------------------------
 # 设备与编排
 # --------------------------------------------------------------------------
+
+
+def warm_up_imports() -> None:
+    """在主线程完成上游 `FlashSR` 的导入。
+
+    `backend.import_flashsr()` 会经 `joblib → loky` 引入
+    `concurrent.futures.process`，其导入会拉起 multiprocessing 的
+    resource tracker 并与主线程交互。若在推理线程内导入，而主线程正阻塞于
+    stdin 读取，会死锁 —— stdin 为管道时（Rust 侧的常态）必现：Worker 发出
+    `load_model` 进度后再无任何事件，Rust 永远等不到 result（阶段 6 实测）。
+
+    因此在主线程处理 `process` 命令时先预热，线程内只做纯计算。
+    """
+    backend.import_flashsr()
 
 
 def choose_device(requested: str) -> torch.device:

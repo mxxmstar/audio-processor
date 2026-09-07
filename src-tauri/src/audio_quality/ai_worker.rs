@@ -1031,4 +1031,61 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    // 真实权重前向验证（环境受限，默认忽略；`cargo test --ignored` 运行）。
+    // 需要 3.3 GB 权重已落地且 `bin/ffmpeg.exe` 可用，CPU 上单条前向较慢。
+    #[tokio::test]
+    #[ignore = "需要 3.3 GB 真实权重 + ffmpeg，且 CPU 前向较慢"]
+    async fn flashsr_real_worker_forward_pass() {
+        let Some(spec) = WorkerSpec::flashsr() else {
+            eprintln!("skip: FlashSR python runtime unavailable");
+            return;
+        };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cache = root.join("models").join("cache").join("flashsr");
+        for name in ["student_ldm.pth", "sr_vocoder.pth", "vae.pth"] {
+            if !cache.join(name).is_file() {
+                eprintln!("skip: missing weight {name}");
+                return;
+            }
+        }
+        let ffmpeg = root.join("bin").join("ffmpeg.exe");
+        if !ffmpeg.is_file() {
+            eprintln!("skip: ffmpeg not found");
+            return;
+        }
+        let dir = temp_dir();
+        let input = dir.join("input.wav");
+        let output = dir.join("output.flac.part");
+        let status = std::process::Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=6:sample_rate=48000",
+                "-ac",
+                "2",
+                input.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !status.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("skip: ffmpeg failed");
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let mut request =
+            AiProcessRequest::new("test-flashsr-real", &input, &output);
+        request.model_id = "flashsr".into();
+        request.device = "cpu".into();
+        request.output_sample_rate = Some(48_000);
+
+        let run = run_worker(&spec, &request, None).await.unwrap();
+        assert_eq!(run.result.model_id, "flashsr");
+        assert_eq!(run.result.sample_rate, 48_000, "FlashSR 输出必须 48 kHz");
+        assert!(output.exists(), "真实前向应产出文件");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

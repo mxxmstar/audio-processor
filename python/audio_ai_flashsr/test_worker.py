@@ -167,13 +167,50 @@ class ManifestTests(unittest.TestCase):
                 worker.read_manifest(model_dir)
             self.assertEqual(raised.exception.code, "MODEL_MANIFEST_INVALID")
 
-    def test_rejects_unsupported_backend(self) -> None:
+    def test_skips_unsupported_backend_entries(self) -> None:
+        # 共享 manifest 含其它后端条目时，本 Worker 应跳过它们而非整份拒绝
+        # （否则引入 flashsr 会破坏既有 AudioSR / DeepFilterNet 功能）。
         with tempfile.TemporaryDirectory() as directory:
             model_dir = Path(directory)
             _write_weights(model_dir, FILES)
-            _manifest(model_dir, {}, backend="audiosr")
-            with self.assertRaisesRegex(worker.WorkerFailure, "unsupported model backend"):
-                worker.read_manifest(model_dir)
+            flashsr_entry = {
+                "id": "flashsr",
+                "backend": "flashsr",
+                "version": "test-version",
+                "file": "cache/flashsr",
+                "files": [
+                    {
+                        "name": name,
+                        "file": f"cache/flashsr/{name}.pth",
+                        "size_bytes": len(contents),
+                        "sha256": "0" * 64,
+                        "source": f"https://example.invalid/{name}.pth",
+                    }
+                    for name, contents in FILES.items()
+                ],
+            }
+            foreign_entry = {
+                "id": "audiosr-basic",
+                "backend": "audiosr",
+                "model_name": "basic",
+                "version": "x",
+                "file": "cache/audiosr-basic/pytorch_model.bin",
+                "size_bytes": 1,
+                "sha256": "0" * 64,
+                "source": "https://example.invalid/m.bin",
+            }
+            model_dir.joinpath("manifest.json").write_text(
+                json.dumps(
+                    {"models": [flashsr_entry, foreign_entry]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            manifest = worker.read_manifest(model_dir)
+            self.assertIsNotNone(manifest)
+            assert manifest is not None
+            self.assertIn("flashsr", manifest)
+            self.assertNotIn("audiosr-basic", manifest)
 
     def test_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

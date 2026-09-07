@@ -69,6 +69,12 @@ def torch_load_fallback() -> Iterator[None]:
     original = torch.load
 
     def load(*args: Any, **kwargs: Any) -> Any:
+        # 权重以 CUDA 设备张量保存时，CPU 环境必须显式 map_location='cpu'，
+        # 否则 torch 在反序列化 CUDA storage 时抛
+        # "Attempting to deserialize object on a CUDA device but
+        # torch.cuda.is_available() is False" 并卡死（阶段 6 实测）。
+        if "map_location" not in kwargs and not torch.cuda.is_available():
+            kwargs["map_location"] = torch.device("cpu")
         try:
             return original(*args, **kwargs)
         except Exception as error:  # noqa: BLE001 - torch 抛出的类型随版本变化

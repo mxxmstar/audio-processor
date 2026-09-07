@@ -27,32 +27,30 @@
       "backend": "flashsr",
       "version": "2501.10807+5701dea",
       "file": "cache/flashsr",
-      "placeholder": true,
-      "note": "size_bytes 与 sha256 为占位符，需在权重下载后填入实测值（见实施计划阶段 3）",
       "files": [
         {
           "name": "student_ldm",
           "file": "cache/flashsr/student_ldm.pth",
-          "size_bytes": 1,
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "source": "https://huggingface.co/Plachta/FlashSR/resolve/main/FlashSR/student_ldm.pth"
+          "size_bytes": 1033200174,
+          "sha256": "f5c373b8748327d69b923c3f2de802a2f5b07f3ede01a1c528a4e5f92ce34ff3",
+          "source": "https://huggingface.co/datasets/jakeoneijk/FlashSR_weights/resolve/main/student_ldm.pth"
         },
         {
           "name": "sr_vocoder",
           "file": "cache/flashsr/sr_vocoder.pth",
-          "size_bytes": 1,
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "source": "https://huggingface.co/Plachta/FlashSR/resolve/main/FlashSR/sr_vocoder.pth"
+          "size_bytes": 627861067,
+          "sha256": "3c3f030afc1cbf5d6c555cb5b895fdf61806e1237da19318f3d6a846943c0af3",
+          "source": "https://huggingface.co/datasets/jakeoneijk/FlashSR_weights/resolve/main/sr_vocoder.pth"
         },
         {
           "name": "vae",
           "file": "cache/flashsr/vae.pth",
-          "size_bytes": 1,
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "source": "https://huggingface.co/Plachta/FlashSR/resolve/main/FlashSR/vae.pth"
+          "size_bytes": 1655458345,
+          "sha256": "7dbbea1f52832625a899344bfa91d48e7fd9499db95cf0b8e6d1ee065c3f4e09",
+          "source": "https://huggingface.co/datasets/jakeoneijk/FlashSR_weights/resolve/main/vae.pth"
         }
       ],
-      "upstream": "https://github.com/Plachta/FlashSR"
+      "upstream": "https://github.com/jakeoneijk/FlashSR_Inference"
     }
   ]
 }
