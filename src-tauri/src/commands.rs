@@ -108,7 +108,8 @@ pub fn open_path(path: String) -> Result<(), String> {
     }
 
     // 文件则定位到所在目录并选中；目录则直接打开。
-    let (target, select) = if p.is_dir() {
+    let open_dir = p.is_dir();
+    let (target, select) = if open_dir {
         (p.to_path_buf(), None)
     } else {
         (
@@ -142,6 +143,10 @@ pub fn open_path(path: String) -> Result<(), String> {
 
     match status {
         Ok(s) if s.success() => Ok(()),
+        // Windows 上用 `explorer 目录路径` 直接打开目录时，Explorer 即便成功也会
+        // 固定返回退出码 1（这是 explorer 的已知行为），但目录实际已经打开。
+        // 路径已被 exists() 确认存在，因此目录场景下忽略退出码，避免误报失败。
+        Ok(_) if open_dir => Ok(()),
         Ok(s) => Err(format!("打开失败（退出码 {s}）")),
         Err(e) => Err(format!("打开失败: {e}")),
     }
