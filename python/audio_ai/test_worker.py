@@ -291,6 +291,19 @@ class ChunkedWriteTests(unittest.TestCase):
             writer.discard()
         self.assertFalse(writer.path.exists())
 
+    def test_writer_rejects_nan_or_inf_output(self) -> None:
+        """回归：归一化结果含 NaN/Inf 必须抛 OUTPUT_INVALID，不能静默写盘。"""
+        writer = worker.PcmChunkWriter(channels=1)
+        try:
+            with self.assertRaises(worker.WorkerFailure) as context:
+                writer.write(np.array([[0.5, np.nan, 0.3]], dtype=np.float32))
+            self.assertEqual(context.exception.code, "OUTPUT_INVALID")
+            with self.assertRaises(worker.WorkerFailure) as context:
+                writer.write(np.array([[0.5, np.inf]], dtype=np.float32))
+            self.assertEqual(context.exception.code, "OUTPUT_INVALID")
+        finally:
+            writer.discard()
+
     def test_writer_discard_is_idempotent_after_close(self) -> None:
         writer = worker.PcmChunkWriter(channels=1)
         writer.write(np.array([[0.1, 0.2]], dtype=np.float32))

@@ -979,6 +979,12 @@ class PcmChunkWriter:
         """写入一块定稿音频；`None` 表示当前没有可定稿的样本。"""
         if region is None or region.size == 0:
             return
+        # 还原旧代码的安全网：归一化后若出现 NaN/Inf（模型输出不稳定），旧实现
+        # 会在整段 output 上做 isfinite 检查并抛出 OUTPUT_INVALID。这里 region
+        # 已是归一化结果，必须同样拦截——否则 np.abs(region).max() 对 NaN 返回
+        # NaN，而 NaN > self.peak 恒为 False，坏样本会被静默写进输出文件。
+        if not np.isfinite(region).all():
+            raise WorkerFailure("OUTPUT_INVALID", "enhanced output contains NaN or Inf")
         magnitude = float(np.abs(region).max())
         if magnitude > self.peak:
             self.peak = magnitude
