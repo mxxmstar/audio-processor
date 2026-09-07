@@ -15,7 +15,13 @@ pub const PROTOCOL_VERSION: u32 = 1;
 const MAX_PROTOCOL_LINE_BYTES: usize = 1024 * 1024;
 const MAX_EVENTS: usize = 4096;
 const MAX_ERROR_STDERR_BYTES: usize = 8 * 1024;
-const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// 收到 result / ready 后给子进程自行退出的宽限期。
+///
+/// 跑完 FlashSR 这类 3.3 GB 权重的推理后，Python 解释器关闭要释放张量、
+/// join 线程并执行 loky 注册的 `_python_exit`，实测远超原先的 2 秒。旧值会
+/// 让 `finish_child` 强杀子进程（Windows 下 `TerminateProcess` 退出码 1），
+/// 把已经成功并写好输出的任务误判为失败（阶段 6 实测）。
+const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 一个 AI 处理请求。路径由 Rust 分配，Python 只执行结构化请求中的路径。
@@ -505,8 +511,18 @@ pub async fn run_worker_with_callback(
             WorkerError::NotReady
         });
     };
+    // 已拿到 result 时任务实际已完成，且输出文件已由 Python 侧校验存在。
+    // 此时的退出码只反映"收尾 / 解释器关闭"阶段（例如被宽限期强杀），
+    // 不应据此丢弃一个已经成功的任务 —— 否则会把 54 MB 的有效输出判为失败
+    // （阶段 6 实测）。诊断信息仍随 `stderr` 返回，便于排查。
     if !status.success() {
-        return Err(worker_exit_error(status.code(), &stderr));
+        eprintln!(
+            "AI Worker 已完成但退出码非 0（{}），仅记录不判失败",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".into())
+        );
     }
 
     Ok(WorkerRunOutput {
@@ -1012,6 +1028,25 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event, WorkerEvent::Progress { .. })));
+        assert!(output.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn result_is_accepted_even_when_worker_exits_non_zero() {
+        // 生产缺陷回归：任务已完成、result 已发出，但收尾阶段退出码非 0
+        // （FlashSR 释放 3.3 GB 权重超过旧的 2 秒宽限期被强杀）。
+        // 已拿到 result 时不应把成功的任务判为失败。
+        let Some(spec) = WorkerSpec::flashsr_fake("success-bad-exit") else {
+            eprintln!("skip: FlashSR python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let output = dir.join("output.flac.part");
+        let request =
+            AiProcessRequest::new("test-flashsr-bad-exit", Path::new("input.m4a"), &output);
+        let run = run_worker(&spec, &request, None).await.unwrap();
+        assert_eq!(run.result.model_id, "flashsr");
         assert!(output.exists());
         let _ = std::fs::remove_dir_all(dir);
     }

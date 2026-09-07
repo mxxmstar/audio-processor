@@ -24,7 +24,7 @@ from protocol import PROTOCOL_VERSION, WorkerFailure, emit, emit_error  # noqa: 
 
 WORKER_VERSION = "fake-flashsr-0.1.0"
 
-MODES = ("success", "slow", "error", "crash")
+MODES = ("success", "slow", "error", "crash", "success-bad-exit")
 
 
 def process_request(request: dict[str, Any], mode: str, cancel_event: threading.Event) -> None:
@@ -76,6 +76,16 @@ def process_request(request: dict[str, Any], mode: str, cancel_event: threading.
             "peak_db": -1.0,
         }
     )
+
+    if mode == "success-bad-exit":
+        # 复现生产缺陷：任务已完成、result 已发出，但收尾阶段（如被宽限期
+        # 强杀、或解释器关闭异常）退出码非 0。此时 Rust 侧不得判为失败。
+        print(
+            "fake flashsr worker exits non-zero after a successful result",
+            file=sys.stderr,
+            flush=True,
+        )
+        os._exit(1)
 
 
 def main() -> int:

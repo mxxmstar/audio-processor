@@ -856,6 +856,14 @@ result    status=completed  sample_rate=48000  channels=2
 > 因此只有复现生产形态才能发现。已用「写命令后 stdin 保持打开 240 秒」的 cmd
 > 脚本验证修复前必挂、修复后 100 s 完成。
 
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| D13 | 真实 App 里任务**实际成功**（54 MB 输出已写出、`result emitted`）却报「进程异常退出，退出码 Some(1)」 | 收到 result 后 Rust 只给子进程 **2 秒**退出宽限；FlashSR 释放 3.3 GB 权重 + join 线程远超 2 秒 → 被 `finish_child` 强杀（Windows `TerminateProcess` 退出码 1）；且 `run_worker` 即使已拿到 result 仍按退出码判失败 | `CHILD_EXIT_TIMEOUT` 2s → 15s；已收到 result 时退出码非 0 只记录不判失败 |
+
+> D13 的回归测试：`flashsr_fake_worker` 新增 `success-bad-exit` 模式（发完
+> result 后 `os._exit(1)`），Rust 侧 `result_is_accepted_even_when_worker_exits_non_zero`
+> 断言此时仍返回 Ok。
+
 **遗留**：GPU 上的质量/耗时对比（与 AudioSR）与 44.1 kHz 输入的主观验收仍待
 具备 GPU 的环境执行；`num_steps` / `overlap_seconds` 的 CPU 参数挑选可基于
 0.20x 的实测基线继续。
