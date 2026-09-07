@@ -868,6 +868,7 @@ result    status=completed  sample_rate=48000  channels=2
 |---|---|---|---|
 | D14 | 进度卡在 `load_model`(5%) 后**永远不返回、也不报错**（多次实测挂起 45 分钟） | `pipeline.warm_up_imports()` 在主线程预热上游导入时若失败，原逻辑仅记日志就照常起推理线程；线程内再导入 `joblib→loky` 会触发 D12 的死锁 → 静默挂起 | 预热失败时**直接 `emit_error`（fail-fast）**并 `continue`，不再起线程；Rust 侧收到明确 `MODEL_RUNTIME_NOT_FOUND` 而非卡死 |
 | D15 | `AI Worker 进程异常退出，退出码 Some(-1)`（stderr 仅到 `weight_norm` FutureWarning） | 退出码 -1 在 Windows 上是**原生崩溃**（非 Python 异常），几乎总是**内存不足**：FlashSR 一次推理需约 4–6 GB 可用内存，且会触发对其它大模型（如 audiosr-basic 6.18 GB 权重）的 sha256 校验，二者并发易内存/IO 争用崩进程 | Rust 侧对 `code == Some(-1)` 追加 OOM 提示（避免误判为程序 bug）；建议不要同时跑其它 AI 任务、避开后台大权重校验 |
+| D16 | 修好 FlashSR 后，UI 把 **AudioSR / DeepFilterNet 标成「不可用」**（即便权重完好、`.venv` 中 `audiosr` 可导入、worker 启动后 `ready` 仍回报 `models:["audiosr-basic","deepfilternet2-speech"]`） | `audio_quality_check_ai_runtime` 只探测**当前选中模型**对应的那个 worker（选 FlashSR 就只探测 FlashSR worker → `models:["flashsr"]`），UI 用该列表做全集判断，于是把运行在**不同** `.venv` 的 AudioSR / DeepFilterNet 误判不可用 | 改为探测时**合并所有后端 worker（FlashSR + production）的可用模型取并集**返回；新增回归测试 `runtime_check_unions_models_across_backends` 锁定「选 FlashSR 时 AudioSR 仍可用」 |
 
 > 实测隔离环境（用真实 MP3、44.1 kHz）可正常跑通：加载 3.3 GB 权重 → 解码 →
 > 重采样 48 kHz → 推理（CPU 约 0.20x 实时）→ 写出 FLAC，`load_model` 之后持续

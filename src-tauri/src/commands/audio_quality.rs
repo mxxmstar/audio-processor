@@ -133,45 +133,83 @@ pub struct AudioQualityStartInput {
 
 /// 检查 Python AI Worker 是否能启动并完成 JSONL ready 握手。
 ///
-/// `model_id` 选填，决定探测哪一个后端（FlashSR 用 `.venv-flashsr` 的独立
-/// Worker，AudioSR 用 `.venv` 的 Worker）。`AUDIO_AI_WORKER` 可指定未来
-/// 打包后的 Worker 可执行文件；未配置且 `AUDIO_AI_USE_FAKE=1` 时使用仓库内
-/// fake Worker，仅用于开发协议验证，并通过 `productionReady=false` 明确
-/// 标记其不是实际 AI 模型运行时。
+/// `model_id` 选填，决定**主探测**哪一个后端（FlashSR 用 `.venv-flashsr` 的
+/// 独立 Worker，AudioSR / DeepFilterNet 用 `.venv` 的 Worker），用于
+/// `worker_kind` / 版本展示。但不同后端运行在**不同的** Python 运行时，各自
+/// 探测。若只探测当前选中的那一个，选 FlashSR 时 AudioSR / DeepFilterNet 会被
+/// 误判为「不可用」。因此这里额外探测另一后端并把所有可用模型取**并集**返回，
+/// UI 才能正确标注每个模型的可用性。
+///
+/// `AUDIO_AI_WORKER` 可指定未来打包后的 Worker 可执行文件；未配置且
+/// `AUDIO_AI_USE_FAKE=1` 时使用仓库内 fake Worker，仅用于开发协议验证，并通过
+/// `productionReady=false` 明确标记其不是实际 AI 模型运行时。
 #[tauri::command]
 pub async fn audio_quality_check_ai_runtime(
     model_id: Option<String>,
 ) -> Result<AiRuntimeCheck, String> {
     let model_id = model_id.unwrap_or_else(|| "audiosr-basic".into());
-    let Ok((spec, worker_kind)) = backend::select_worker_spec(&model_id) else {
-        return Ok(unavailable_runtime("找不到 Python AI Worker 或 Python 运行时"));
-    };
 
-    let program = spec.program.to_string_lossy().into_owned();
-    let is_fake = worker_kind.ends_with("fake");
-    match ai_worker::probe_worker(&spec).await {
-        Ok(ready) => Ok(AiRuntimeCheck {
-            available: true,
-            production_ready: !is_fake && !ready.models.is_empty(),
-            protocol_version: PROTOCOL_VERSION,
-            worker_kind,
-            program: Some(program),
-            worker_version: Some(ready.worker_version),
-            models: ready.models,
-            model_errors: ready.model_errors,
-            error: None,
-        }),
-        Err(error) => Ok(AiRuntimeCheck {
-            available: false,
-            production_ready: false,
-            protocol_version: PROTOCOL_VERSION,
-            worker_kind,
-            program: Some(program),
-            worker_version: None,
-            models: Vec::new(),
-            model_errors: Vec::new(),
-            error: Some(error.to_string()),
-        }),
+    // 主探测：针对当前选中的 model_id，用于 worker_kind / 版本 / 主可用性展示。
+    // 连对应的 Worker 规格都解析不出来（通常发生在找不到 Python 运行时），直接
+    // 返回「不可用」，无需再探测其它后端。
+    let primary_spec = match backend::select_worker_spec(&model_id) {
+        Ok(spec) => spec,
+        Err(_) => return Ok(unavailable_runtime("找不到 Python AI Worker 或 Python 运行时")),
+    };
+    let primary_ready = ai_worker::probe_worker(&primary_spec.0).await.ok();
+    let worker_kind = primary_spec.1.clone();
+    let program = primary_spec.0.program.to_string_lossy().into_owned();
+
+    // 合并全部后端 Worker 的可用模型，避免「仅探测当前选中 worker 时其它后端
+    // 被误判为不可用」。某一后端进程起不来时跳过它的模型，不影响其它后端。
+    let mut models: Vec<String> = Vec::new();
+    let mut model_errors: Vec<String> = Vec::new();
+    if let Some(ready) = &primary_ready {
+        merge_worker_models(&mut models, &mut model_errors, ready);
+    }
+    for spec in [WorkerSpec::flashsr(), WorkerSpec::production()]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(ready) = ai_worker::probe_worker(&spec).await {
+            merge_worker_models(&mut models, &mut model_errors, &ready);
+        }
+    }
+
+    let available = primary_ready.is_some() || !models.is_empty();
+    let production_ready = !models.is_empty();
+    Ok(AiRuntimeCheck {
+        available,
+        production_ready,
+        protocol_version: PROTOCOL_VERSION,
+        worker_kind,
+        program: Some(program),
+        worker_version: primary_ready.as_ref().map(|r| r.worker_version.clone()),
+        models,
+        model_errors,
+        error: if primary_ready.is_none() {
+            Some("主模型运行时探测失败（其它后端仍可能可用）".into())
+        } else {
+            None
+        },
+    })
+}
+
+/// 把某个 Worker 探测到的可用模型合并进累计集合（去重）。
+fn merge_worker_models(
+    models: &mut Vec<String>,
+    errors: &mut Vec<String>,
+    ready: &ai_worker::WorkerReady,
+) {
+    for m in &ready.models {
+        if !models.contains(m) {
+            models.push(m.clone());
+        }
+    }
+    for e in &ready.model_errors {
+        if !errors.contains(e) {
+            errors.push(e.clone());
+        }
     }
 }
 
@@ -541,6 +579,33 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("audio-processor-quality-command-{suffix}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 回归：当前选中 FlashSR 时，运行时检查仍应把 AudioSR / DeepFilterNet
+    /// 一并报告为可用（跨后端模型并集），而非把它们误判为「不可用」。
+    #[tokio::test]
+    async fn runtime_check_unions_models_across_backends() {
+        if ai_worker::WorkerSpec::flashsr().is_none()
+            || ai_worker::WorkerSpec::production().is_none()
+        {
+            eprintln!("skip: Python AI 运行时不可用");
+            return;
+        }
+        let check = audio_quality_check_ai_runtime(Some("flashsr".into()))
+            .await
+            .unwrap();
+        assert!(
+            check.models.contains(&"flashsr".to_string()),
+            "应包含 flashsr: {:?}",
+            check.models
+        );
+        assert!(
+            check.models.contains(&"audiosr-basic".to_string()),
+            "选 FlashSR 时不应把 AudioSR 误判为不可用: {:?}",
+            check.models
+        );
+        assert!(check.available);
+        assert!(check.production_ready);
     }
 
     #[test]
