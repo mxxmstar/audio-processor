@@ -864,6 +864,16 @@ result    status=completed  sample_rate=48000  channels=2
 > result 后 `os._exit(1)`），Rust 侧 `result_is_accepted_even_when_worker_exits_non_zero`
 > 断言此时仍返回 Ok。
 
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| D14 | 进度卡在 `load_model`(5%) 后**永远不返回、也不报错**（多次实测挂起 45 分钟） | `pipeline.warm_up_imports()` 在主线程预热上游导入时若失败，原逻辑仅记日志就照常起推理线程；线程内再导入 `joblib→loky` 会触发 D12 的死锁 → 静默挂起 | 预热失败时**直接 `emit_error`（fail-fast）**并 `continue`，不再起线程；Rust 侧收到明确 `MODEL_RUNTIME_NOT_FOUND` 而非卡死 |
+| D15 | `AI Worker 进程异常退出，退出码 Some(-1)`（stderr 仅到 `weight_norm` FutureWarning） | 退出码 -1 在 Windows 上是**原生崩溃**（非 Python 异常），几乎总是**内存不足**：FlashSR 一次推理需约 4–6 GB 可用内存，且会触发对其它大模型（如 audiosr-basic 6.18 GB 权重）的 sha256 校验，二者并发易内存/IO 争用崩进程 | Rust 侧对 `code == Some(-1)` 追加 OOM 提示（避免误判为程序 bug）；建议不要同时跑其它 AI 任务、避开后台大权重校验 |
+
+> 实测隔离环境（用真实 MP3、44.1 kHz）可正常跑通：加载 3.3 GB 权重 → 解码 →
+> 重采样 48 kHz → 推理（CPU 约 0.20x 实时）→ 写出 FLAC，`load_model` 之后持续
+> 推进 `inference` 进度，直至 `result`。故流水线本身正确，挂起/崩溃均为
+> 运行期资源与线程时序问题。
+
 **遗留**：GPU 上的质量/耗时对比（与 AudioSR）与 44.1 kHz 输入的主观验收仍待
 具备 GPU 的环境执行；`num_steps` / `overlap_seconds` 的 CPU 参数挑选可基于
 0.20x 的实测基线继续。

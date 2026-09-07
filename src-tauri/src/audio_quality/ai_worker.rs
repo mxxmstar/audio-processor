@@ -731,9 +731,18 @@ fn worker_exit_error(code: Option<i32>, stderr: &str) -> WorkerError {
             format!("，stderr: {}", stderr_tail(&cleaned, MAX_ERROR_STDERR_BYTES))
         }
     };
+    // 退出码 -1（Windows 上 TerminateProcess 异常终止 / 原生崩溃）往往是内存不足
+    // 或依赖冲突导致的硬崩溃，并非 Python 异常。FlashSR 推理一次需约 4–6 GB 可用
+    // 内存，且会触发对其它大模型（如 audiosr-basic 6 GB 权重）的 sha256 校验，二者
+    // 并发极易内存/IO 争用。给一个可操作的提示，避免用户误以为程序有 bug。
+    let hint = if code == Some(-1) {
+        "（进程异常终止；可能由内存不足导致：FlashSR 需约 4–6 GB 可用内存，请避免同时运行其它 AI 任务，并留意是否在后台校验其它大模型权重）"
+    } else {
+        ""
+    };
     WorkerError::Exited {
         code,
-        stderr: detail,
+        stderr: format!("{}{}", detail, hint),
     }
 }
 

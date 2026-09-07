@@ -355,12 +355,23 @@ def main() -> int:
             # 必须在主线程预热上游导入：它会经 joblib → loky 拉起
             # multiprocessing 的 resource tracker，若在推理线程内导入而主线程
             # 阻塞于 stdin 读取，会死锁（stdin 为管道时必现，见
-            # pipeline.warm_up_imports 的说明）。预热失败不致命，交给线程内
-            # 的常规错误处理路径上报。
+            # pipeline.warm_up_imports 的说明）。
             try:
                 pipeline.warm_up_imports()
             except Exception as error:  # noqa: BLE001
+                # 预热失败时**绝不能照常起线程**：线程内会再试一次导入，
+                # 于是触发上面的死锁 —— 表现为进度停在 load_model(5%) 且
+                # 永远不返回、也不报错（2026-09-07 实测挂起 45 分钟）。
+                # 这里直接失败，把原因报给 Rust 侧，避免静默挂起。
                 log(f"warm-up import failed: {type(error).__name__}: {error}")
+                emit_error(
+                    request_id,
+                    WorkerFailure(
+                        "MODEL_RUNTIME_NOT_FOUND",
+                        f"无法导入 FlashSR: {type(error).__name__}: {error}",
+                    ),
+                )
+                continue
             cancel_event.clear()
             # 必须用非守护线程：主线程一旦退出，守护线程会被立即杀死，
             # 正在写回的结果 / 错误事件会随之丢失，表现为「进程异常退出、
