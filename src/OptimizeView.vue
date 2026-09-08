@@ -47,8 +47,23 @@ interface ModelInfo {
   backend: string;
 }
 
-// 「音质优化」：固定的 HiFi-GAN 神经声码器后端，不暴露其它模型切换。
+// 「音质优化」：HiFi-GAN 后端提供两档可选。hifigan-48k 为快速/轻量档（原 22.05k
+// 重建，机械音偏重）；bigvgan-48k 为高质量/增强档（BigVGAN-v2 44.1k，机械音消除）。
 const HIFIGAN_MODEL_ID = "hifigan-48k";
+
+// 两档模型的档位说明，用于下拉标注与提示。
+const MODEL_TIERS: Record<string, { tier: string; tag: string; desc: string }> = {
+  "hifigan-48k": {
+    tier: "快速 / 轻量",
+    tag: "fast",
+    desc: "原 HiFi-GAN（22.05k 权重，重建后重采样到 48k）：推理快、权重仅约 53MB，但带宽受限、机械音偏重，不提升已丢失的高频。",
+  },
+  "bigvgan-48k": {
+    tier: "高质量 / 增强",
+    tag: "quality",
+    desc: "BigVGAN-v2 44.1kHz（重采样到 48k）：原生带宽约 22kHz，机械音大幅消除、更自然；但权重 451MB、推理更慢。",
+  },
+};
 
 const inputPath = ref("");
 const modelId = ref(HIFIGAN_MODEL_ID);
@@ -88,19 +103,21 @@ const modelOptions = computed(() => {
     .filter((m) => m.backend === "hifigan")
     .map((m) => {
       const available = availableModelIds.value.has(m.id);
-      const desc = "神经声码器 · 保真重建（不提升高频；重建后重采样，非原生 48k）";
+      const tier = MODEL_TIERS[m.id];
+      const label = tier
+        ? `${m.id} · ${tier.tier}${available ? " · 可用" : " · 不可用"}`
+        : `${m.id}${available ? " · 可用" : " · 不可用"}`;
       return {
-        label: `${m.id}${available ? " · 可用" : " · 不可用"}`,
+        label,
         value: m.id,
-        title: desc,
+        title: tier ? `${tier.tier}：${tier.desc}` : "",
       };
     });
 });
 
 const modelHint = computed(() => {
-  const backend = backendOf(modelId.value);
-  if (backend === "hifigan")
-    return "HiFi-GAN = 神经声码器（保真重建）；权重原生 22050 Hz，重建后重采样到 48000 Hz（非原生 48k），不提升已丢失高频";
+  const tier = MODEL_TIERS[modelId.value];
+  if (tier) return `${tier.tier}：${tier.desc}`;
   return "";
 });
 
@@ -359,6 +376,14 @@ onUnmounted(() => {
         </a-descriptions-item>
       </a-descriptions>
 
+      <a-alert
+        v-if="runtime"
+        class="msg"
+        type="info"
+        show-icon
+        message="音质优化提供两档：快速/轻量（hifigan-48k，原 22.05k 重建，机械音偏重、推理快）与 高质量/增强（bigvgan-48k，BigVGAN-v2 44.1k，机械音大幅消除、更自然，但权重 451MB、推理更慢）。按需求选择。"
+      />
+
       <a-form layout="vertical" class="form">
         <a-form-item label="输入音频">
           <a-space wrap>
@@ -443,7 +468,7 @@ onUnmounted(() => {
             取消任务
           </a-button>
         </a-space>
-        <div class="hint">输出文件将自动生成在源文件旁（扩展名 .ai.flac），不会覆盖原文件。HiFi-GAN 为神经声码器，重建波形而非提升已丢失的高频；当前权重原生 22050 Hz，重建后重采样至 48000 Hz（非原生 48k）。</div>
+        <div class="hint">输出文件将自动生成在源文件旁（扩展名 .ai.flac），不会覆盖原文件。两档均为神经声码器，重建波形而非提升已丢失的高频：快速档权重原生 22050 Hz、重建后重采样至 48000 Hz（机械音偏重）；高质量档 BigVGAN-v2 原生 44.1kHz、重采样至 48000 Hz（更自然）。</div>
       </a-form>
 
       <a-empty

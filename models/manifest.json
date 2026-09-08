@@ -64,6 +64,29 @@
       "sample_rate": 22050,
       "upstream": "https://github.com/jik876/hifi-gan",
       "note": "22.05k checkpoint，重建后重采样到 48k（计划 §3.4）。权重源为 jaketae/hifigan-lj-v1（jik876 V1 的公开可达移植），其架构参数与本 Worker 的 22.05k 配置完全一致：upsample_rates=[8,8,2,2]、upsample_initial_channel=512、resblock_kernel_sizes=[3,7,11]、resblock_dilation_sizes=[[1,3,5]]*3。为什么不直接用 jik876 官方：官方权重仅以 Google Drive 文件夹分发（无直链），且 GitHub 仓库根目录不含任何权重；HuggingFace 的 jik876/hifi-gan 返回 401 不可达（构建环境与用户环境均如此）。该 checkpoint 以 weight_norm 形式保存（键含 *.weight_g/weight_v），vendor_bridge.load_model 已适配两种保存格式。"
+    },
+    {
+      "id": "bigvgan-48k",
+      "backend": "hifigan",
+      "version": "nvidia-bigvgan-v2-44khz-128band-256x",
+      "model_name": "BigVGAN v2 44.1kHz (重采样至 48kHz)",
+      "sample_rate": 44100,
+      "files": [
+        {
+          "name": "generator",
+          "file": "bigvgan-48k/bigvgan_generator.pt",
+          "size_bytes": 451292555,
+          "sha256": "e2f20b06bd9e09c173c61665164cf1db77e50b96fff73b968b5060a25e62c900",
+          "source": "https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_256x"
+        },
+        {
+          "name": "config",
+          "file": "bigvgan-48k/config.json",
+          "size_bytes": 1402,
+          "sha256": "044bcb35f1d043d3619edd768c4c3cfae6c9674ec2ef4ee604d0588ff1b3ea73",
+          "source": "https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_256x"
+        }
+      ]
     }
   ]
 }
