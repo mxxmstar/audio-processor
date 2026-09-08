@@ -167,9 +167,13 @@ pub async fn audio_quality_check_ai_runtime(
     if let Some(ready) = &primary_ready {
         merge_worker_models(&mut models, &mut model_errors, ready);
     }
-    for spec in [WorkerSpec::flashsr(), WorkerSpec::production()]
-        .into_iter()
-        .flatten()
+    for spec in [
+        WorkerSpec::flashsr(),
+        WorkerSpec::production(),
+        WorkerSpec::hifigan(),
+    ]
+    .into_iter()
+    .flatten()
     {
         if let Ok(ready) = ai_worker::probe_worker(&spec).await {
             merge_worker_models(&mut models, &mut model_errors, &ready);

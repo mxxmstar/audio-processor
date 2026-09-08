@@ -51,6 +51,17 @@
         }
       ],
       "upstream": "https://github.com/jakeoneijk/FlashSR_Inference"
+    },
+    {
+      "id": "hifigan-48k",
+      "backend": "hifigan",
+      "version": "0.0.1",
+      "file": "cache/hifigan/UNIVERSAL_LJSPEECH_48k/generator",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "https://huggingface.co/jik876/hifi-gan/resolve/main/UNIVERSAL_LJSPEECH/generator",
+      "sample_rate": 48000,
+      "upstream": "https://github.com/jik876/hifi-gan",
+      "note": "权重策略待定（P1/R3）：48k 训练权重尚未锁定；source/sha256 为占位值，安装须待阶段 3.5 提供真实权重与校验值。原生 48k 未落实前可改用 22.05k checkpoint + 重采样（见实施计划 §3.4）"
     }
   ]
 }

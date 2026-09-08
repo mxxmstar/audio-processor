@@ -1,6 +1,6 @@
 # HiFi-GAN 集成实施计划
 
-> 状态：实施中（阶段 0、1 已完成）
+> 状态：实施中（阶段 0、1、2 已完成）
 > 编制日期：2026-09-08
 > 目标：把 **HiFi-GAN 神经声码器**作为音质提升的可选后端接入现有 JSONL Worker 协议，
 > 复用 FlashSR 集成所确立的全部约定（参考 `docs/FlashSR集成实施计划.md`）。
@@ -324,6 +324,42 @@ python/audio_ai/model_manager.py         （显式断点下载 + SHA-256 校验�
 - **权重加载**：`pipeline.get_runner` 按 `(权重路径, 设备)` 缓存生成器；`audio_to_mel`
   依赖 librosa（`.venv-flashsr` 已含），真实前向需阶段 2 的 manifest 条目 + `model_manager`
   下载权重后方可端到端验证。
+
+---
+
+## 4.3 阶段 2 实施记录（2026-09-08）
+
+### 4.3.1 交付物（Rust 路由 + manifest）
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/audio_quality/backend.rs` | `Backend` 枚举新增 `HiFiGan`；`as_str`/`parse`（含 `hifigan` 前缀）支持；`BackendDefaults::for_backend` 新增 HiFi-GAN 分支（块 30 s、重叠 0，声码器整段前向）；`select_worker_spec` 新增 `HiFiGan` 真实分支（`WorkerSpec::hifigan()`），fake 模式按后端选 `hifigan_fake` 以回显正确 `model_id` |
+| `src-tauri/src/audio_quality/ai_worker.rs` | 新增 `WorkerSpec::hifigan()` 与 `WorkerSpec::hifigan_fake(mode)`（复用 `.venv-flashsr` 运行时与 `audio_ai_hifigan/` 脚本；支持 `AUDIO_AI_HIFIGAN_WORKER` 覆盖）；新增 `hifigan_fake_worker_ready_probe` / `hifigan_fake_worker_success_round_trip` 集成测试 |
+| `src-tauri/src/commands/audio_quality.rs` | `audio_quality_check_ai_runtime` 的跨后端并集探测列表加入 `WorkerSpec::hifigan()`，确保 hifigan-48k 在任意主模型下都出现在可用模型并集里 |
+| `models/manifest.json` | 新增 `hifigan-48k` 条目（`backend:"hifigan"`、`sample_rate:48000`、`version:0.0.1`）；`source`/`sha256` 为占位值，待阶段 3.5 锁定真实 48k 权重后回填（见 R3 / §3.5） |
+
+### 4.3.2 验证结果
+
+- `cd src-tauri && cargo test --lib audio_quality` → **24 passed / 1 ignored / 0 failed**。
+  - `hifigan_fake_worker_ready_probe`：`ready.models == ["hifigan-48k"]`、`worker_version: "fake-hifigan-0.1.0"`（复用 `.venv-flashsr` 真实拉起 fake Worker 全链路打通）。
+  - `hifigan_fake_worker_success_round_trip`：`ready → progress → result` 完整，`result.model_id == "hifigan-48k"`。
+  - `hifigan_defaults_use_large_chunk_and_zero_overlap`、`resolve_backend_parses_exact_and_prefix`（含 `hifigan-48k`/`hifigan-custom`）通过。
+- **无回归**：直接拉起 `python/audio_ai/worker.py` 的 `ready` 仍正确列出
+  `["audiosr-basic", "deepfilternet2-speech"]`，阶段 2 的 manifest 条目（被 production Worker
+  的后端白名单跳过）不影响既有后端。
+- 唯一一次全量并行跑出现 `runtime_check_unions_models_across_backends` 失败，复跑通过；
+  定位为 `READY_TIMEOUT=3s` 在并行测试负载下的偶发超时（本阶段新增的 hifigan 探针增加了
+  python 进程并发数），**非逻辑回归**——`--test-threads=1` 稳定通过，production Worker 的
+  `ready` 行为未变。
+
+### 4.3.3 待办（延续到阶段 3 / 3.5）
+
+- 前端菜单与 `OptimizeView.vue`（阶段 3）尚未接入；运行时检查已能识别 `hifigan-48k`（未安装时
+  显示为不可用）。
+- `model_manager` 下载分支 + 真实 48k 权重 URL / sha256（R3 / §3.5）待锁定；在落实前
+  `hifigan-48k` 的安装会失败（manifest 占位 `source`）。
+- 22.05k 公开 checkpoint 的「重采样回退」（§3.4）在权重策略确定为 22.05k 时再接入
+  `pipeline`（届时按 manifest `sample_rate` 选配置与解码率）。
 
 ---
 

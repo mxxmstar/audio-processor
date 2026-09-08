@@ -278,6 +278,44 @@ impl WorkerSpec {
                 .arg(mode),
         )
     }
+
+    /// HiFi-GAN 处理 Worker。它与 FlashSR **共用** `.venv-flashsr` 运行时
+    /// （方案 A 复用 vendor 与依赖，见实施计划 §3.2），因此解析同一个 Python。
+    pub fn hifigan() -> Option<Self> {
+        if let Some(path) = std::env::var_os("AUDIO_AI_HIFIGAN_WORKER") {
+            return Some(Self::new(path));
+        }
+        let python = find_python_flashsr()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai_hifigan")
+            .join("worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(Self::new(python).arg("-u").arg(script))
+    }
+
+    /// HiFi-GAN 协议自检用的 fake Worker（与 FlashSR 的 `flashsr_fake` 同构）。
+    pub fn hifigan_fake(mode: &str) -> Option<Self> {
+        let python = find_python_flashsr()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai_hifigan")
+            .join("fake_worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(
+            Self::new(python)
+                .arg("-u")
+                .arg(script)
+                .arg("--mode")
+                .arg(mode),
+        )
+    }
 }
 
 /// 已完成的 Worker 运行结果和有限事件记录。
@@ -1015,6 +1053,42 @@ mod tests {
         let ready = probe_worker(&spec).await.unwrap();
         assert_eq!(ready.worker_version, "fake-flashsr-0.1.0");
         assert_eq!(ready.models, vec!["flashsr"]);
+    }
+
+    // ---- HiFi-GAN 独立 Worker（`.venv-flashsr` + `audio_ai_hifigan/fake_worker.py`）----
+
+    #[tokio::test]
+    async fn hifigan_fake_worker_ready_probe() {
+        let Some(spec) = WorkerSpec::hifigan_fake("success") else {
+            eprintln!("skip: HiFi-GAN python runtime unavailable");
+            return;
+        };
+        let ready = probe_worker(&spec).await.unwrap();
+        assert_eq!(ready.worker_version, "fake-hifigan-0.1.0");
+        assert_eq!(ready.models, vec!["hifigan-48k"]);
+    }
+
+    #[tokio::test]
+    async fn hifigan_fake_worker_success_round_trip() {
+        let Some(spec) = WorkerSpec::hifigan_fake("success") else {
+            eprintln!("skip: HiFi-GAN python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let output = dir.join("output.flac.part");
+        let request = AiProcessRequest::new("test-hifigan-success", Path::new("input.m4a"), &output);
+        let run = run_worker(&spec, &request, None).await.unwrap();
+        assert_eq!(run.result.output_path, output.to_string_lossy());
+        assert!(run
+            .events
+            .iter()
+            .any(|event| matches!(event, WorkerEvent::Ready { models, .. } if models.contains(&"hifigan-48k".to_string()))));
+        assert!(run
+            .events
+            .iter()
+            .any(|event| matches!(event, WorkerEvent::Progress { .. })));
+        assert!(output.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

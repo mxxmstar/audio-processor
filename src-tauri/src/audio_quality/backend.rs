@@ -18,6 +18,7 @@ pub enum Backend {
     FlashSr,
     AudioSr,
     DeepFilterNet,
+    HiFiGan,
     Unknown,
 }
 
@@ -27,6 +28,7 @@ impl Backend {
             Backend::FlashSr => "flashsr",
             Backend::AudioSr => "audiosr",
             Backend::DeepFilterNet => "deepfilternet",
+            Backend::HiFiGan => "hifigan",
             Backend::Unknown => "unknown",
         }
     }
@@ -37,6 +39,7 @@ impl Backend {
             "flashsr" => Backend::FlashSr,
             "audiosr" => Backend::AudioSr,
             "deepfilternet" => Backend::DeepFilterNet,
+            "hifigan" => Backend::HiFiGan,
             other => {
                 if other.starts_with("flashsr") {
                     Backend::FlashSr
@@ -44,6 +47,8 @@ impl Backend {
                     Backend::AudioSr
                 } else if other.starts_with("deepfilternet") {
                     Backend::DeepFilterNet
+                } else if other.starts_with("hifigan") {
+                    Backend::HiFiGan
                 } else {
                     Backend::Unknown
                 }
@@ -75,6 +80,13 @@ impl BackendDefaults {
                 overlap_seconds: 1.28,
                 default_device: "auto",
             },
+            // HiFi-GAN 是全卷积声码器，可整段前向（无 FlashSR 的定长硬限制），
+            // 因此块可更大；声码器重建无需重叠相加，overlap 设为 0。
+            Backend::HiFiGan => BackendDefaults {
+                chunk_seconds: 30.0,
+                overlap_seconds: 0.0,
+                default_device: "auto",
+            },
             _ => BackendDefaults {
                 chunk_seconds: 20.0,
                 overlap_seconds: 2.0,
@@ -100,15 +112,26 @@ pub fn select_worker_spec(model_id: &str) -> Result<(WorkerSpec, String), String
         return Ok((WorkerSpec::new(path), "configured".into()));
     }
     if std::env::var("AUDIO_AI_USE_FAKE").as_deref() == Ok("1") {
-        let fake = WorkerSpec::flashsr_fake("success")
-            .map(|spec| (spec, "flashsr-fake".into()))
-            .or_else(|| WorkerSpec::fake("success").map(|spec| (spec, "fake".into())));
+        // 按 model_id 的后端选对应 fake Worker：保证 result.model_id 与请求一致
+        // （hifigan 的 fake Worker 回显 "hifigan-48k"）。回退链保证 FlashSR /
+        // 通用 fake 仍可用。
+        let fake = match resolve_backend(model_id) {
+            Backend::FlashSr => WorkerSpec::flashsr_fake("success"),
+            Backend::HiFiGan => WorkerSpec::hifigan_fake("success"),
+            _ => None,
+        }
+        .or_else(|| WorkerSpec::flashsr_fake("success"))
+        .or_else(|| WorkerSpec::fake("success"))
+        .map(|spec| (spec, "fake".into()));
         return fake.ok_or_else(|| "找不到 Python 运行时，无法启动 fake Worker".into());
     }
     let backend = resolve_backend(model_id);
     let spec = match backend {
         Backend::FlashSr => WorkerSpec::flashsr()
             .map(|spec| (spec, "flashsr".into()))
+            .or_else(|| WorkerSpec::production().map(|spec| (spec, "python".into()))),
+        Backend::HiFiGan => WorkerSpec::hifigan()
+            .map(|spec| (spec, "hifigan".into()))
             .or_else(|| WorkerSpec::production().map(|spec| (spec, "python".into()))),
         _ => WorkerSpec::production().map(|spec| (spec, "python".into())),
     };
@@ -181,6 +204,8 @@ mod tests {
         assert_eq!(Backend::parse("flashsr-custom"), Backend::FlashSr);
         assert_eq!(Backend::parse("audiosr-custom"), Backend::AudioSr);
         assert_eq!(Backend::parse("deepfilternet2-speech"), Backend::DeepFilterNet);
+        assert_eq!(Backend::parse("hifigan-48k"), Backend::HiFiGan);
+        assert_eq!(Backend::parse("hifigan-custom"), Backend::HiFiGan);
         assert_eq!(Backend::parse("totally-unknown"), Backend::Unknown);
     }
 
@@ -200,11 +225,21 @@ mod tests {
     }
 
     #[test]
+    fn hifigan_defaults_use_large_chunk_and_zero_overlap() {
+        // 声码器整段前向，块更大；重建无需重叠相加。overlap 必须 < chunk。
+        let defaults = BackendDefaults::for_backend(Backend::HiFiGan);
+        assert_eq!(defaults.chunk_seconds, 30.0);
+        assert_eq!(defaults.overlap_seconds, 0.0);
+        assert!(defaults.overlap_seconds < defaults.chunk_seconds);
+    }
+
+    #[test]
     fn list_models_reads_backend_field() {
         // 不依赖真实 manifest：直接验证 parse 链路在 manifest 缺失时是空列表
         // 且不会 panic。
         let models = list_models();
-        // 真实仓库 manifest 存在时为 3 个模型，CI 缺 manifest 时为 0；均合法
-        assert!(models.len() <= 3);
+        // 真实仓库 manifest 含 deepfilternet2-speech / audiosr-basic / flashsr /
+        // hifigan-48k 共 4 个模型，CI 缺 manifest 时为 0；均合法。
+        assert!(models.len() <= 4);
     }
 }
