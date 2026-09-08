@@ -1,6 +1,6 @@
 # HiFi-GAN 集成实施计划
 
-> 状态：规划中（待评审）
+> 状态：实施中（阶段 0 已完成）
 > 编制日期：2026-09-08
 > 目标：把 **HiFi-GAN 神经声码器**作为音质提升的可选后端接入现有 JSONL Worker 协议，
 > 复用 FlashSR 集成所确立的全部约定（参考 `docs/FlashSR集成实施计划.md`）。
@@ -234,6 +234,55 @@ python/audio_ai/model_manager.py         （显式断点下载 + SHA-256 校验�
 | **3 · 前端入口** | 按 §3.6 在 `App.vue` 的「音频品质提升」父项下新增同级子菜单「音质优化」（key `optimize`），新增独立 `OptimizeView.vue`（以 `QualityView.vue` 为模板、预设模型 `hifigan-48k`）；`BackendDefaults` 给合理 `chunk_seconds`/`overlap_seconds`（声码器可整段前向，块可更大） | 独立菜单可见、可取消、进度可见，且不改动现有 QualityView |
 | **4 · 测试** | fake worker 协议回归；真实权重前向（CPU，忽略项，同 FlashSR `flashsr_real_worker_forward_pass`）；UI 冒烟 | 测试通过 |
 | **5 · 文档** | 更新 `低质量音频转高品质音频功能规划.md` 档位表；本计划转"实施中/已完成" | 文档同步 |
+
+---
+
+## 4.1 阶段 0 实施记录（2026-09-08）
+
+### 4.1.1 交付物
+
+新增 `python/audio_ai_hifigan/`（与 `audio_ai_flashsr` 平级的独立后端包）：
+
+| 文件 | 职责 |
+|---|---|
+| `vendor_bridge.py` | vendor 导入桥接 + 薄封装（shim），解决 P2 |
+| `selfcheck.py` | 阶段 0 可行性自检：Generator 单次前向 + 导入桥接验证 |
+| `__init__.py` | 包导出 |
+
+### 4.1.2 可行性结论
+
+- **模型代码（Generator）跑通**：基于 vendor `FlashSR.AudioSR.hifigan.models.Generator`
+  与 `get_vocoder_config_48k()` 构造 48k 生成器（**190.28M 参数**），对随机
+  mel `[1, 256, 200]` 单次前向输出 `[1, 1, 96016]`，上采样倍率 ≈ `hop_size=480`
+  （`200 × 480 = 96000`，余量为 padding），输出有限、受 `tanh` 限幅于 `[-1, 1]`。
+  证明 vendor 实现与 48k 配置自洽，**前向路径可行**。
+- **P2 导入桥接通过**：`install_vendor_aliases()` 把训练仓库布局
+  `HParams` / `DataProcess.Util.UtilAudioMelSpec` / `Model.vocoder.hifigan.env`
+  / `Model.vocoder.hifigan.models` / `UtilHiFiGanWrapper` 全部桥接到 vendor 实际
+  布局，`import UtilHiFiGanWrapper` 解析成功（仅验证导入，实例化需权重，属后续阶段）。
+- **环境约束**：本机无 `.venv-flashsr`，可行性验证用全局 `python 3.10 + torch
+  2.11.0+cpu`（仅 torch 即可跑 Generator 前向）。官方运行环境仍是 `.venv-flashsr`
+  （`requirements-flashsr.txt` 已含 torch/numpy/scipy/soundfile/librosa/einops/PyYAML/
+  tqdm；matplotlib/sklearn 由 `ensure_inference_only_imports()` 打桩，无需安装）。
+  `vendor_bridge` 沿用 FlashSR 的打桩逻辑，在缺 librosa/scipy 的环境下也能解析导入，
+  在 `.venv-flashsr` 下使用真实依赖。
+
+### 4.1.3 关键风险再确认（P1 / R3）
+
+- **P1 · 48k 权重缺失仍是最高优先级阻塞**。vendor 仅提供 48k **配置**
+  （`get_vocoder_config_48k`），不含对应训练权重。公开 checkpoint（jik876/hifi-gan：
+  `UNIVERSAL_LJSPEECH` / `VCTK` / `LIBRITTS`）输出 **22.05k / 24k**；社区 48k HiFi-GAN
+  权重来源不稳定、未锁定 License。→ 进入阶段 1 前必须二选一并在 `manifest.json` 体现：
+  1. 找到/训练 48k 权重（直出 48k，首选，需锁定 URL + sha256）；
+  2. 否则用 22.05k checkpoint + `ffmpeg` 重采样到 48k（§3.4 回退，档位文案标
+     "重建后重采样（非原生 48k）"）。**阶段 0 未解决权重获取，阶段 1 的 manifest
+  条目与 `model_manager` 分支须先确定采用哪种**。
+
+### 4.1.4 下一步（阶段 1 入口）
+
+- 确定权重策略（§4.1.3）后，新建 `python/audio_ai_hifigan/worker.py` + `fake_worker.py`，
+  协议与 `audio_ai_flashsr/worker.py` 同构；`HiFiGanRunner` 已具备 `load_model` /
+  `audio_to_mel` / `mel_to_audio` 骨架，阶段 1 填充 JSONL 主循环与定长分块推理。
 
 ---
 
