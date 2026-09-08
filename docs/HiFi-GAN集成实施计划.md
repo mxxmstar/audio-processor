@@ -1,6 +1,6 @@
 # HiFi-GAN 集成实施计划
 
-> 状态：实施中（阶段 0 已完成）
+> 状态：实施中（阶段 0、1 已完成）
 > 编制日期：2026-09-08
 > 目标：把 **HiFi-GAN 神经声码器**作为音质提升的可选后端接入现有 JSONL Worker 协议，
 > 复用 FlashSR 集成所确立的全部约定（参考 `docs/FlashSR集成实施计划.md`）。
@@ -283,6 +283,47 @@ python/audio_ai/model_manager.py         （显式断点下载 + SHA-256 校验�
 - 确定权重策略（§4.1.3）后，新建 `python/audio_ai_hifigan/worker.py` + `fake_worker.py`，
   协议与 `audio_ai_flashsr/worker.py` 同构；`HiFiGanRunner` 已具备 `load_model` /
   `audio_to_mel` / `mel_to_audio` 骨架，阶段 1 填充 JSONL 主循环与定长分块推理。
+
+---
+
+## 4.2 阶段 1 实施记录（2026-09-08）
+
+### 4.2.1 交付物
+
+在 `python/audio_ai_hifigan/` 新增：
+
+| 文件 | 职责 |
+|---|---|
+| `protocol.py` | JSONL 协议原语（与 FlashSR 同构，仅标准库；`worker`/`pipeline` 共用同一 `WorkerFailure`） |
+| `worker.py` | JSONL 协议主循环 + 清单解析；顶层仅标准库（R12），`SUPPORTED_BACKENDS={"hifigan}"` |
+| `pipeline.py` | 推理编排：探测 / 解码 → 逐声道 mel 提取 → 生成器前向 → 编码；复用 FlashSR 的 OLA 落盘与编码原语 |
+| `fake_worker.py` | 协议自检假后端（`--mode success\|slow\|error\|crash\|success-bad-exit`），`models:["hifigan-48k"]` |
+| `test_worker.py` | 清单解析 + `find_model` + `available_models` + 顶层无重量级依赖断言（16 项，不需 torch） |
+
+阶段 0 的 `vendor_bridge.py` 同步微调：`mel_to_audio` 现在能接受二维
+`[mel_bins, time]` 并自动补 batch 维（逐声道推理路径）。
+
+### 4.2.2 验证结果
+
+- `python python/audio_ai_hifigan/test_worker.py` → **16 tests OK**（清单解析、跨后端跳过、
+  路径逃逸拦截、`find_model` 大小/哈希校验、`available_models` 延迟哈希、`worker` 顶层不导入
+  torch/numpy）。
+- 真实 `worker.py --model-dir <含 hifigan-48k 清单>` → `ready` 事件 `models:["hifigan-48k"]`、
+  `model_errors:[]`、`worker_version:"python-hifigan-0.1.0"`（握手链路打通）。
+- `fake_worker.py --mode success` → 完整事件序列 `ready → progress×7 → result`，
+  `result.model_id:"hifigan-48k"`、`sample_rate:48000`、`channels:2`。
+- `read_lints` 对全部新增文件零告警。
+
+### 4.2.3 设计要点与待办
+
+- **声码器语义**：HiFi-GAN 是 mel→waveform，无 FlashSR 的定长硬限制；本流水线逐声道独立
+  「提取 mel → 生成器前向 → 波形」再合并（R8 单体声道），整段前向、不做重叠相加。
+- **输出采样率**：固定 48k（原生 48k 权重）。22.05k 公开 checkpoint 的「重采样回退」方案
+  （§3.4）待阶段 2 确定权重策略后接入（届时 `pipeline` 需按 manifest `sample_rate` 选配置
+  与解码率）。
+- **权重加载**：`pipeline.get_runner` 按 `(权重路径, 设备)` 缓存生成器；`audio_to_mel`
+  依赖 librosa（`.venv-flashsr` 已含），真实前向需阶段 2 的 manifest 条目 + `model_manager`
+  下载权重后方可端到端验证。
 
 ---
 

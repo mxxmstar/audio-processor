@@ -325,13 +325,19 @@ class HiFiGanRunner:
         return self.mel_extractor.get_hifigan_mel_spec(audio)
 
     def mel_to_audio(self, mel):
-        """mel → 波形。`mel` 形状 `[mel_bins, time]` 或 `[batch, mel_bins, time]`。"""
+        """mel → 波形。`mel` 形状 `[mel_bins, time]` 或 `[batch, mel_bins, time]`。
+
+        单声道时上游 `audio_to_mel` 返回 `[mel_bins, time]`（二维），这里自动补
+        上 batch 维喂给生成器；返回已是 CPU 上的 `(time,)` numpy 数组。
+        """
         import torch
 
         if self.generator is None:
             raise RuntimeError("Generator 未加载：请先调用 load_model()")
         if not torch.is_tensor(mel):
             mel = torch.from_numpy(mel)
+        if mel.dim() == 2:
+            mel = mel.unsqueeze(0)
         mel = mel.to(self.device)
         with torch.no_grad():
             wav = self.generator(mel)
