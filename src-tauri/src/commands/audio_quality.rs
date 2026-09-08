@@ -405,6 +405,7 @@ pub fn audio_quality_start(
 #[tauri::command(rename_all = "snake_case")]
 pub fn audio_quality_cancel(
     task_id: String,
+    app: AppHandle,
     state: State<'_, AudioQualityState>,
 ) -> Result<(), String> {
     if state.cancel(&task_id) {
@@ -412,6 +413,9 @@ pub fn audio_quality_cancel(
             task.phase = "cancelling".into();
             task.message = Some("正在取消 Python AI Worker".into());
         });
+        // 必须立即回推一次状态：否则前端要一直等到 Worker 真正退出才更新，
+        // 期间进度条仍停在「上一次的进度」，看起来像点了取消没反应。
+        emit_task_progress(&app, &state, &task_id);
         Ok(())
     } else {
         Err(format!("找不到可取消的音频处理任务: {task_id}"))

@@ -305,6 +305,15 @@ def build_generator(
     return generator
 
 
+def warm_up_mel_extractor(config: dict[str, Any] | None = None) -> None:
+    """在主线程构造一次 mel 提取器（不加载权重）。
+
+    目的见 `HiFiGanRunner.ensure_mel_extractor`：把 vendor mel 模块的导入与
+    resource tracker 的建立固定在主线程，杜绝推理线程内首次导入导致的死锁。
+    """
+    HiFiGanRunner(config).ensure_mel_extractor()
+
+
 class HiFiGanRunner:
     """HiFi-GAN 薄封装：mel 提取 → 生成器前向 → 写盘。
 
@@ -346,10 +355,14 @@ class HiFiGanRunner:
         self.generator.eval()
         return self
 
-    def audio_to_mel(self, audio):
-        """音频 → log-mel（需 librosa；阶段 0 仅前向验证不依赖此路径）。
+    def ensure_mel_extractor(self):
+        """构造 mel 提取器（惰性）。
 
-        `audio` 形状 `[time]` 或 `[batch, time]`，float32，范围 [-1, 1]。
+        **必须在主线程完成首次构造**：`TorchJaekwon.Util.UtilAudioMelSpec` 的导入
+        链会经 joblib → loky 拉起 multiprocessing 的 resource tracker，若留到推理
+        线程内首次导入，而主线程此时阻塞于 stdin 读取，二者会死锁（stdin 为管道时
+        必现，见实施计划 R12）。为此 `pipeline.warm_up_imports()` 会在主线程先调
+        一次本方法；这里保留惰性构造只是兜底。
         """
         if self.mel_extractor is None:
             bootstrap_vendor_path()
@@ -365,7 +378,14 @@ class HiFiGanRunner:
                 frequency_min=c["fmin"],
                 frequency_max=c["fmax"],
             )
-        return self.mel_extractor.get_hifigan_mel_spec(audio)
+        return self.mel_extractor
+
+    def audio_to_mel(self, audio):
+        """音频 → log-mel（需 librosa；阶段 0 仅前向验证不依赖此路径）。
+
+        `audio` 形状 `[time]` 或 `[batch, time]`，float32，范围 [-1, 1]。
+        """
+        return self.ensure_mel_extractor().get_hifigan_mel_spec(audio)
 
     def mel_to_audio(self, mel):
         """mel → 波形。`mel` 形状 `[mel_bins, time]` 或 `[batch, mel_bins, time]`。

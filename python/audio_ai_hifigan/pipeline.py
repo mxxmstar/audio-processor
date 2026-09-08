@@ -301,6 +301,14 @@ def warm_up_imports() -> None:
     vendor_bridge.ensure_inference_only_imports()
     # 触发生成器类的解析，确保主线程已完成潜在重导入
     vendor_bridge.build_generator(remove_weight_norm=True)
+    # mel 提取器同样必须在主线程完成导入与构造：`UtilAudioMelSpec` 的导入链经
+    # joblib → loky 拉起 multiprocessing 的 resource tracker，若留到推理线程内
+    # 首次导入，而主线程正阻塞于 stdin 读取，二者死锁（stdin 为管道时必现）。
+    # 这正是「短音频也卡在 10%」的根因 —— 10% 是 prepare_input，下一步就是首次
+    # mel 提取。仅构造提取器，不加载权重。
+    vendor_bridge.warm_up_mel_extractor()
+    # 重采样用到的 scipy.signal 一并预热，避免同样的线程内首次导入风险。
+    import scipy.signal  # noqa: F401
 
 
 def choose_device(requested: str) -> torch.device:

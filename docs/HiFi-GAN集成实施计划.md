@@ -547,6 +547,41 @@ HiFi-GAN 的 pipeline 漏掉了这一环。
 > 时长偏差约 0.15%（25 s 输入得 24.96 s）来自 mel 的 hop 帧量化，
 > **与分块无关**——整段前向时是同一比例，属既有行为，不影响听感。
 
+### 4.6.6 补记：短音频也卡在 10% —— mel 提取器的线程内导入死锁
+
+**现象**：不只是长音频，**短音频（如 Windows Ding.wav）同样卡在 10%**，
+且点取消后只有"已请求取消"，进度条停在旧状态不动。
+
+**根因**：`HiFiGanRunner.audio_to_mel` 里**惰性**导入
+`from TorchJaekwon.Util.UtilAudioMelSpec import UtilAudioMelSpec`（vendor_bridge 第 357 行）。
+首次调用发生在**推理线程**内，而该导入链经 joblib → loky 拉起 multiprocessing 的
+resource tracker；此时主线程正阻塞于 `read_stdin_line()` → **死锁**（stdin 为管道时必现）。
+
+这正是 R12 早已记录的场景，但 `warm_up_imports()` 当时只预热了**生成器类**，
+**漏掉了 mel 提取器**。10% 是 `prepare_input`，下一步就是首次 mel 提取，故必卡在此处。
+
+> **为什么此前没测出来（重要教训）**：4.6.3、4.6.5 的验证都是**在主线程直接调
+> `pipeline.enhance`**，stdin 也并非管道 —— 这种结构**根本无法复现**该死锁。
+> 必须由「**子进程 + stdin/stdout 管道**」启动 worker 并发送 `process` 命令才能复现。
+
+**修复**：
+
+- `vendor_bridge`：把惰性构造抽成 `ensure_mel_extractor()`，新增
+  `warm_up_mel_extractor()`；
+- `pipeline.warm_up_imports()`：在主线程先构造一次 mel 提取器，并预热 `scipy.signal`
+  （重采样用），杜绝线程内首次导入。
+
+**验证**（管道起 worker + 发 process 命令，1 s 立体声）：
+
+| | 事件流 |
+|---|---|
+| 修复前 | `ready → 5% → 10%`，之后 **45 s 无任何事件**（复现卡死） |
+| 修复后 | `5% → 10% → 50% → 90% → 92.5%(resample) → 95% → result: completed`，全程 **4.9 s** |
+
+**顺带修 UI 反馈**：`audio_quality_cancel` 原先只置取消标志、不回推事件，前端要一直等到
+Worker 真正退出才更新，期间进度条停在旧状态（表现为"点了取消没反应"）。现补上
+`AppHandle` 并在置标志后立即 `emit_task_progress` 一次，切到 "正在取消" 状态。
+
 ---
 
 ## 5. 风险与缺陷预登记表（R1–Rn）
