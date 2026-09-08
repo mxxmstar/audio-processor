@@ -88,7 +88,7 @@ const modelOptions = computed(() => {
     .filter((m) => m.backend === "hifigan")
     .map((m) => {
       const available = availableModelIds.value.has(m.id);
-      const desc = "神经声码器 · 保真重建（不提升高频）";
+      const desc = "神经声码器 · 保真重建（不提升高频；重建后重采样，非原生 48k）";
       return {
         label: `${m.id}${available ? " · 可用" : " · 不可用"}`,
         value: m.id,
@@ -100,7 +100,7 @@ const modelOptions = computed(() => {
 const modelHint = computed(() => {
   const backend = backendOf(modelId.value);
   if (backend === "hifigan")
-    return "HiFi-GAN = 神经声码器（保真重建）；仅支持 48000 Hz 输出，不提升已丢失高频";
+    return "HiFi-GAN = 神经声码器（保真重建）；权重原生 22050 Hz，重建后重采样到 48000 Hz（非原生 48k），不提升已丢失高频";
   return "";
 });
 
@@ -115,7 +115,7 @@ const isFixed48k = computed(() => backendOf(modelId.value) === "hifigan");
 
 const sampleRateOptions = computed(() =>
   isFixed48k.value
-    ? [{ label: "48000 Hz（模型固定）", value: 48000 }]
+    ? [{ label: "48000 Hz（模型固定 · 22.05k 重采样）", value: 48000 }]
     : [
         { label: "48000 Hz", value: 48000 },
         { label: "44100 Hz", value: 44100 },
@@ -443,7 +443,7 @@ onUnmounted(() => {
             取消任务
           </a-button>
         </a-space>
-        <div class="hint">输出文件将自动生成在源文件旁（扩展名 .ai.flac），不会覆盖原文件。HiFi-GAN 为神经声码器，重建波形而非提升已丢失的高频。</div>
+        <div class="hint">输出文件将自动生成在源文件旁（扩展名 .ai.flac），不会覆盖原文件。HiFi-GAN 为神经声码器，重建波形而非提升已丢失的高频；当前权重原生 22050 Hz，重建后重采样至 48000 Hz（非原生 48k）。</div>
       </a-form>
 
       <a-empty

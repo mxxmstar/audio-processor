@@ -475,8 +475,11 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 - **端到端前向仍待用户在可达网络取回权重后验证**：本构建环境对 jik876 官方镜像
   返回 401，无法下载 → 无法实测 sha256/size、无法运行 `hifigan_real_worker_forward_pass`。
   用户在可访问该 URL 的环境点「安装模型」后，`cargo test --ignored` 即可覆盖。
-- **口径文案**：22.05k 为「重建后重采样（非原生 48k）」，需在 `OptimizeView.vue`
-  的档位/提示文案中标注（阶段 3 的 `modelHint` 目前仅说明声码器定位，未含此口径）。
+- **口径文案**（已补齐）：22.05k 为「重建后重采样（非原生 48k）」，已在
+  `src/OptimizeView.vue` 四处标注 —— 模型下拉描述（`desc`）、`modelHint`
+  （权重原生 22050 Hz、重建后重采样到 48000 Hz）、采样率选项标签
+  （「48000 Hz（模型固定 · 22.05k 重采样）」）、底部 `.hint` 说明。
+  `npm run build` 通过（12.37s，无错误）。
 - 若日后取得原生 48k 权重：将 manifest 的 `file` 指向该权重并把 `sample_rate` 改为
   `48000` 即可，pipeline 会自动走直出分支（无需代码改动）。
 
