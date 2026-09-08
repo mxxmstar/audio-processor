@@ -48,6 +48,17 @@ PERCENT_INFERENCE_START = 10.0
 PERCENT_INFERENCE_SPAN = 80.0
 PERCENT_WRITE_OUTPUT = 95.0
 
+#: 分块推理。HiFi-GAN 是全卷积、理论上可整段前向，但整段跑有两个实际问题：
+#: ① 进度只在「一个声道跑完」后才推进，长音频会长时间停在 10%，表现为卡死；
+#: ② 中间张量随时长线性增长，长音频内存峰值可达数 GB。
+#: Rust 侧按后端下发 `chunk_seconds`（HiFi-GAN 默认 30s），此处据此切块，
+#: 与 FlashSR「Python 侧自行切块」的既有约定一致。
+DEFAULT_CHUNK_SECONDS = 30.0
+
+#: 块两侧的上下文余量（秒）。卷积感受野在块边界会产生伪影，故每块多取一段
+#: 作为上下文，生成后按原区间裁掉，避免拼接处出现爆音。
+CONTEXT_PAD_SECONDS = 0.5
+
 #: 运行时缓存：同一 (权重路径, 设备) 只加载一次生成器。
 _RUNNER_CACHE: dict[tuple[str, str], Any] = {}
 _RUNNER_LOCK = threading.Lock()
@@ -377,21 +388,47 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
         emit_progress(request_id, "prepare_input", PERCENT_PREPARE, message="解码完成，提取 mel")
 
     total_seconds = frames / native_rate
+    chunk_seconds = request.get("chunk_seconds")
+    try:
+        chunk_seconds = float(chunk_seconds) if chunk_seconds is not None else 0.0
+    except (TypeError, ValueError):
+        chunk_seconds = 0.0
+    if not (chunk_seconds > 0):
+        chunk_seconds = DEFAULT_CHUNK_SECONDS
+    chunk_frames = max(1, int(chunk_seconds * native_rate))
+    pad_frames = min(chunk_frames, int(CONTEXT_PAD_SECONDS * native_rate))
+
     predicted_channels: list[np.ndarray] = []
     for ch in range(audio.shape[0]):
         if cancel_event.is_set():
             raise WorkerFailure("CANCELLED", "processing cancelled")
-        # 单声道 mel 提取 → 生成器前向 → 单声道波形
-        mel = runner.audio_to_mel(audio[ch]).squeeze()
-        wav = runner.mel_to_audio(mel)
-        predicted_channels.append(wav)
-        emit_progress(
-            request_id,
-            "inference",
-            PERCENT_INFERENCE_START + PERCENT_INFERENCE_SPAN * (ch + 1) / audio.shape[0],
-            processed_seconds=total_seconds * (ch + 1) / audio.shape[0],
-            total_seconds=total_seconds or source_duration,
-        )
+        channel_audio = audio[ch]
+        starts = list(range(0, frames, chunk_frames))
+        pieces: list[np.ndarray] = []
+        for index, start in enumerate(starts):
+            if cancel_event.is_set():
+                raise WorkerFailure("CANCELLED", "processing cancelled")
+            end = min(frames, start + chunk_frames)
+            # 多取 pad 作为上下文，生成后裁掉，消除块边界的感受野伪影
+            seg_start = max(0, start - pad_frames)
+            seg_end = min(frames, end + pad_frames)
+            segment = channel_audio[seg_start:seg_end]
+            mel = runner.audio_to_mel(segment).squeeze()
+            wav = runner.mel_to_audio(mel)
+            # 生成长度与输入段长度可能有一帧级偏差，按比例换算裁剪位置
+            scale = wav.shape[0] / segment.shape[0] if segment.shape[0] else 1.0
+            left = int(round((start - seg_start) * scale))
+            right = min(wav.shape[0], int(round((end - seg_start) * scale)))
+            pieces.append(wav[left:right])
+            done = ch + (index + 1) / len(starts)
+            emit_progress(
+                request_id,
+                "inference",
+                PERCENT_INFERENCE_START + PERCENT_INFERENCE_SPAN * done / audio.shape[0],
+                processed_seconds=total_seconds * done / audio.shape[0],
+                total_seconds=total_seconds or source_duration,
+            )
+        predicted_channels.append(np.concatenate(pieces))
 
     predicted = np.stack(predicted_channels, axis=0)
     if not np.isfinite(predicted).all():
