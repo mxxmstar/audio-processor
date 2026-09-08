@@ -49,6 +49,10 @@ bin/ffmpeg
 bin/ffmpeg-*
 models/*.pt
 models/*.pth
+# 嵌套子目录权重同样忽略（如 bigvgan-48k/bigvgan_generator.pt），由 manifest source 下载/部署
+python/audio_ai_hifigan/models/**/*.pt
+python/audio_ai_hifigan/models/**/*.pth
+python/audio_ai_hifigan/models/**/*.bin
 models/*.ts
 models/*.zip
 models/*.tar.gz

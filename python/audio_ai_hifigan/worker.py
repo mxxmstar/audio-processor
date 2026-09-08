@@ -32,6 +32,9 @@ MODULE_ROOT = Path(__file__).resolve().parent
 #: HiFi-GAN 后端在 manifest 中的 backend 标识与默认模型 id。
 SUPPORTED_BACKENDS = frozenset({"hifigan"})
 HIFIGAN_MODEL_ID = "hifigan-48k"
+#: BigVGAN-v2 44.1kHz 声码器（原生 48k 增强的替代档，输出重采样到 48k），
+#: 复用同一 hifigan 后端进程，仅 model_id 不同，pipeline 内按 id 分流。
+BIGVGAN_MODEL_ID = "bigvgan-48k"
 
 # Rust 以 `python <绝对路径>/worker.py` 启动本模块，此时没有包上下文，相对
 # 导入不可用。把本目录加入 sys.path，让 protocol / pipeline 都能以顶层模块解析。

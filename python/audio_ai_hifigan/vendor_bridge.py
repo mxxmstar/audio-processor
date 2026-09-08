@@ -405,3 +405,93 @@ class HiFiGanRunner:
         with torch.no_grad():
             wav = self.generator(mel)
         return wav.squeeze().cpu().numpy()
+
+
+class BigVGANRunner:
+    """BigVGAN 声码器薄封装：mel 提取 → 生成器前向 → 波形。
+
+    与 `HiFiGanRunner` 同构（逐声道 mel → 生成），便于 `pipeline.enhance` 按
+    model_id 无缝分流。原生采样率由权重自带 `config.json` 决定（44.1kHz BigVGAN-v2），
+    下游重采样到 48k 出片，带宽 ~22kHz，从根本上消除 22.05k/8kHz 的「机械音」。
+
+    权重为 NVIDIA 官方布局：`config.json` + `bigvgan_generator.pt`（内含
+    `{"generator": state_dict}`），与 `BigVGAN._save_pretrained` / `_from_pretrained`
+    约定一致，故手动加载（不走 `from_pretrained` 的 hub 机制，避免文件名耦合）。
+    """
+
+    def __init__(self, model_dir: str, device: Any = None):
+        import torch
+
+        self.model_dir = Path(model_dir)
+        self.device = torch.device(device or "cpu")
+        self.model = None
+        self.h = None
+        self.mel_params = None
+
+    def load_model(self, model_dir: str | None = None):
+        import torch
+        import bigvgan
+        from bigvgan import BigVGAN, load_hparams_from_json
+
+        md = Path(model_dir) if model_dir else self.model_dir
+        self.h = load_hparams_from_json(md / "config.json")
+        self.model = BigVGAN(self.h)
+        sd = torch.load(md / "bigvgan_generator.pt", map_location=self.device, weights_only=False)
+        gen = sd["generator"] if isinstance(sd, dict) and "generator" in sd else sd
+        self.model.load_state_dict(gen)
+        self.model.remove_weight_norm()
+        self.model.to(self.device)
+        self.model.eval()
+        fmax = self.h.get("fmax", None)
+        self.mel_params = dict(
+            n_fft=int(self.h["n_fft"]),
+            num_mels=int(self.h["num_mels"]),
+            sampling_rate=int(self.h["sampling_rate"]),
+            hop_size=int(self.h["hop_size"]),
+            win_size=int(self.h["win_size"]),
+            fmin=int(self.h["fmin"]),
+            fmax=(int(fmax) if fmax not in (None, "") else None),
+        )
+        return self
+
+    def audio_to_mel(self, audio):
+        """音频 → log-mel（BigVGAN 的 `mel_spectrogram`：log10 压缩、center=False）。
+
+        `audio` 形状 `[time]` 或 `[batch, time]`，float32，范围 [-1, 1]。
+        返回 `[1, num_mels, T]`（三维），与 `HiFiGanRunner.audio_to_mel` 一致，
+        供 `pipeline` 统一 `.squeeze()`。
+        """
+        import torch
+        import numpy as np
+        from bigvgan import mel_spectrogram
+
+        t = torch.from_numpy(np.asarray(audio, dtype=np.float32))
+        if t.dim() == 1:
+            t = t.unsqueeze(0)
+        t = t.to(self.device)
+        with torch.no_grad():
+            mel = mel_spectrogram(
+                t,
+                n_fft=self.mel_params["n_fft"],
+                num_mels=self.mel_params["num_mels"],
+                sampling_rate=self.mel_params["sampling_rate"],
+                hop_size=self.mel_params["hop_size"],
+                win_size=self.mel_params["win_size"],
+                fmin=self.mel_params["fmin"],
+                fmax=self.mel_params["fmax"],
+                center=False,
+            )
+        return mel
+
+    def mel_to_audio(self, mel):
+        """mel → 波形。`mel` 形状 `[num_mels, T]` 或 `[1, num_mels, T]`。"""
+        import torch
+
+        if not torch.is_tensor(mel):
+            mel = torch.from_numpy(mel)
+        if mel.dim() == 2:
+            mel = mel.unsqueeze(0)
+        mel = mel.to(self.device)
+        with torch.no_grad():
+            wav = self.model(mel)
+        return wav.squeeze().cpu().numpy()

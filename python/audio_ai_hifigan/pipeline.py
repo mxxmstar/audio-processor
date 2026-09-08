@@ -33,7 +33,7 @@ from protocol import (
     log,
     resolve_binary,
 )
-from worker import ModelSpec, find_model, ordered_weights
+from worker import ModelSpec, find_model, ordered_weights, BIGVGAN_MODEL_ID
 
 #: HiFi-GAN 权重文件名（manifest `files[].name`）。
 MODEL_WEIGHT_NAME = ("generator",)
@@ -323,6 +323,9 @@ def warm_up_imports() -> None:
             vendor_bridge.warm_up_mel_extractor()
             # 重采样用到的 scipy.signal 一并预热
             import scipy.signal  # noqa: F401
+            # BigVGAN 包（纯 torch 实现，CPU 走 TorchActivation1d）在主线程导入，
+            # 避免推理线程内首次 import 的潜在阻塞/资源竞争。
+            import bigvgan  # noqa: F401
     finally:
         noise = buffer.getvalue()
         if noise.strip():
@@ -348,6 +351,23 @@ def get_runner(generator_path: Path, device: torch.device, config: dict[str, Any
             runner = vendor_bridge.HiFiGanRunner(config=config, device=device)
             runner.load_model(str(generator_path))
             _RUNNER_CACHE[key] = runner
+        return runner
+
+
+#: BigVGAN 生成器缓存（与 _RUNNER_CACHE 同构，按 (模型目录, 设备) 缓存）。
+_BIGVGAN_RUNNER_CACHE: dict[tuple[str, str], Any] = {}
+_BIGVGAN_RUNNER_LOCK = threading.Lock()
+
+
+def get_bigvgan_runner(model_dir: str, device: torch.device) -> Any:
+    """按 (模型目录, 设备) 缓存已加载的 BigVGAN 生成器，避免重复加载。"""
+    key = (str(model_dir), str(device))
+    with _BIGVGAN_RUNNER_LOCK:
+        runner = _BIGVGAN_RUNNER_CACHE.get(key)
+        if runner is None:
+            runner = vendor_bridge.BigVGANRunner(model_dir=model_dir, device=device)
+            runner.load_model(str(model_dir))
+            _BIGVGAN_RUNNER_CACHE[key] = runner
         return runner
 
 
@@ -380,9 +400,16 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     spec: ModelSpec = find_model(model_id, model_dir)
     device = choose_device(str(request.get("device", "auto")))
 
-    config = vendor_bridge.get_config(spec.native_sample_rate)
-    native_rate = config["sampling_rate"]
-    # 输出固定为 48k（与 App 其它后端对齐）；原生 22.05k 权重在下游重采样到 48k。
+    is_bigvgan = model_id == BIGVGAN_MODEL_ID
+    if is_bigvgan:
+        # BigVGAN-v2 44.1kHz：原生采样率由权重 config.json 决定，mel 参数亦从权重读，
+        # 无需 vendor_bridge.get_config；下游重采样到 48k 出片（计划「换 48k 声码器」）。
+        config = None
+        native_rate = int(spec.native_sample_rate)
+    else:
+        config = vendor_bridge.get_config(spec.native_sample_rate)
+        native_rate = config["sampling_rate"]
+    # 输出固定为 48k（与 App 其它后端对齐）；原生 <48k 权重在下游重采样到 48k。
     TARGET_RATE = 48000
 
     requested_sample_rate = request.get("output_sample_rate")
@@ -394,7 +421,11 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
 
     emit_progress(request_id, "load_model", PERCENT_LOAD_MODEL, message=f"loading {model_id}")
     generator_path = ordered_weights(spec, MODEL_WEIGHT_NAME)[0]
-    runner = get_runner(generator_path, device, config)
+    if is_bigvgan:
+        # BigVGAN 权重为目录布局：generator 文件路径的父目录即模型目录。
+        runner = get_bigvgan_runner(str(Path(generator_path).parent), device)
+    else:
+        runner = get_runner(generator_path, device, config)
 
     if cancel_event.is_set():
         raise WorkerFailure("CANCELLED", "processing cancelled")

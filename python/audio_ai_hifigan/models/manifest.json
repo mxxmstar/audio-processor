@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "id": "bigvgan-48k",
+      "version": "nvidia-bigvgan-v2-44khz-128band-256x",
+      "backend": "hifigan",
+      "file": "bigvgan-48k/bigvgan_generator.pt",
+      "model_name": "BigVGAN v2 44.1kHz (重采样至 48kHz)",
+      "sample_rate": 44100,
+      "files": [
+        {
+          "name": "generator",
+          "file": "bigvgan-48k/bigvgan_generator.pt",
+          "size_bytes": 451292555,
+          "sha256": "e2f20b06bd9e09c173c61665164cf1db77e50b96fff73b968b5060a25e62c900",
+          "source": "https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_256x"
+        },
+        {
+          "name": "config",
+          "file": "bigvgan-48k/config.json",
+          "size_bytes": 1402,
+          "sha256": "044bcb35f1d043d3619edd768c4c3cfae6c9674ec2ef4ee604d0588ff1b3ea73",
+          "source": "https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_256x"
+        }
+      ]
+    }
+  ]
+}
