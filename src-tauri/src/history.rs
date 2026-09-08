@@ -142,6 +142,21 @@ pub fn list(
     Ok(rows)
 }
 
+/// 按种类统计条数。
+///
+/// `kind` 为 `None` 时统计全部。菜单徽标只需要总数，用它是为了避免像 `list`
+/// 那样把整份记录拉到前端再数（`list` 有 `limit` 上限，直接数长度会失真）。
+pub fn count(conn: &Connection, kind: Option<&str>) -> SqlResult<i64> {
+    match kind {
+        Some(k) => conn.query_row(
+            "SELECT COUNT(*) FROM history WHERE kind = ?1",
+            rusqlite::params![k],
+            |r| r.get::<_, i64>(0),
+        ),
+        None => conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0)),
+    }
+}
+
 /// 按 id 取单条。
 pub fn get(conn: &Connection, id: i64) -> SqlResult<Option<HistoryItem>> {
     let mut stmt = conn.prepare(
@@ -167,6 +182,44 @@ pub fn clear(conn: &Connection, kind: Option<&str>) -> SqlResult<()> {
         None => conn.execute("DELETE FROM history", [])?,
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在临时目录建一个独立库，避免测试之间以及与本机历史互相干扰。
+    fn temp_conn(tag: &str) -> (std::path::PathBuf, Connection) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("history_test_{tag}_{nanos}"));
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        let conn = open_db(&dir).expect("打开测试库失败");
+        (dir, conn)
+    }
+
+    #[test]
+    fn count_respects_kind_filter_and_total() {
+        let (dir, conn) = temp_conn("count");
+
+        insert(&conn, HistoryKind::Recognize, "t1", "", "{}", "").unwrap();
+        insert(&conn, HistoryKind::Recognize, "t2", "", "{}", "").unwrap();
+        insert(&conn, HistoryKind::Download, "t3", "", "{}", "").unwrap();
+
+        assert_eq!(count(&conn, Some("recognize")).unwrap(), 2);
+        assert_eq!(count(&conn, Some("download")).unwrap(), 1);
+        assert_eq!(count(&conn, Some("enhance")).unwrap(), 0);
+        assert_eq!(count(&conn, None).unwrap(), 3, "不传 kind 应统计全部");
+
+        // 删除后计数同步下降（菜单徽标依赖这一点）
+        let first = list(&conn, Some("recognize"), 10).unwrap()[0].id;
+        delete(&conn, first).unwrap();
+        assert_eq!(count(&conn, Some("recognize")).unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 行映射辅助。

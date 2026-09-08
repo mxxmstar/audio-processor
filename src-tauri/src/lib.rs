@@ -50,6 +50,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::identify,
             commands::get_history,
+            commands::count_history,
             commands::delete_history,
             commands::open_path,
             commands::audio_quality::audio_quality_check_ai_runtime,

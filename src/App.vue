@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { h, onMounted, onUnmounted, ref } from "vue";
+import { computed, h, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { Badge } from "ant-design-vue";
 import DownloadView from "./DownloadView.vue";
 import RecognizerView from "./RecognizerView.vue";
 import HistoryView from "./HistoryView.vue";
@@ -35,15 +37,69 @@ const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
 const openKeys = ref<string[]>([]);
 
-// antd Menu 的 items：音频识别与 B站下载均作为父项，各自下挂「操作」「历史记录」子项
-const items = [
+// ---- 历史条数徽标 ----
+//
+// 只对真实写入 `history.db` 的 3 种类型显示徽标（recognize / download / enhance）。
+// **aria2 的历史不在这张表里**（`HistoryKind` 没有 aria2 变体，也没有任何写入点），
+// 给它加徽标会恒为 0，看上去像功能坏了，故刻意不加。详见 docs/遗留待办汇总.md C1。
+const HISTORY_KINDS = ["recognize", "download", "enhance"] as const;
+type HistoryKind = (typeof HISTORY_KINDS)[number];
+
+// 菜单里的「历史记录」子项 → 实际历史类型
+const badgeKindByMenuKey: Record<string, HistoryKind> = {
+  "download-history": "download",
+  history: "recognize",
+  "quality-history": "enhance",
+};
+
+const historyCounts = ref<Record<HistoryKind, number>>({
+  recognize: 0,
+  download: 0,
+  enhance: 0,
+});
+
+async function refreshHistoryCounts() {
+  await Promise.all(
+    HISTORY_KINDS.map(async (kind) => {
+      try {
+        historyCounts.value[kind] = await invoke<number>("count_history", { kind });
+      } catch {
+        // 徽标纯属展示增强，取不到就保持上一次的值，绝不影响菜单可用性
+      }
+    })
+  );
+}
+
+// 条数为 0 时不渲染徽标，避免菜单上挂一串无意义的 0
+const historyCountStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "6px",
+};
+
+function historyLabel(menuKey: string) {
+  const kind = badgeKindByMenuKey[menuKey];
+  const count = kind ? historyCounts.value[kind] : 0;
+  return h("span", { style: historyCountStyle }, [
+    "历史记录",
+    count > 0 ? h(Badge, { count, color: "#52c41a" }) : null,
+  ]);
+}
+
+// antd Menu 的 items：音频识别与 B站下载均作为父项，各自下挂「操作」「历史记录」子项。
+// 用 computed 包装，使历史条数变化时菜单能响应式重渲染。
+const items = computed(() => [
   {
     key: "download-group",
     icon: h(DownloadOutlined),
     label: "B站下载",
     children: [
       { key: "download", icon: h(DownloadOutlined), label: "下载" },
-      { key: "download-history", icon: h(HistoryOutlined), label: "历史记录" },
+      {
+        key: "download-history",
+        icon: h(HistoryOutlined),
+        label: historyLabel("download-history"),
+      },
     ],
   },
   {
@@ -61,7 +117,7 @@ const items = [
     label: "音频识别",
     children: [
       { key: "recognize", icon: h(AudioOutlined), label: "识别" },
-      { key: "history", icon: h(HistoryOutlined), label: "历史记录" },
+      { key: "history", icon: h(HistoryOutlined), label: historyLabel("history") },
     ],
   },
   {
@@ -71,7 +127,11 @@ const items = [
     children: [
       { key: "quality", icon: h(SoundOutlined), label: "音质提升" },
       { key: "optimize", icon: h(SoundOutlined), label: "音质优化" },
-      { key: "quality-history", icon: h(HistoryOutlined), label: "历史记录" },
+      {
+        key: "quality-history",
+        icon: h(HistoryOutlined),
+        label: historyLabel("quality-history"),
+      },
     ],
   },
   {
@@ -79,7 +139,7 @@ const items = [
     icon: h(ApiOutlined),
     label: "端口占用",
   },
-];
+]);
 
 // 可切换主视图的子项（父分组项不参与切换）
 const leafKeys: string[] = [
@@ -184,8 +244,23 @@ async function doLogout() {
   userInfo.value = null;
 }
 
-onMounted(refreshLogin);
-onUnmounted(stopPoll);
+// 历史条数的刷新时机：启动时、切换视图时（任务跑完通常会有一次切换），
+// 以及 HistoryView 删除记录后主动抛出的 history-changed 事件。
+let unlistenHistory: (() => void) | null = null;
+
+onMounted(async () => {
+  refreshLogin();
+  await refreshHistoryCounts();
+  unlistenHistory = await listen("history-changed", refreshHistoryCounts);
+});
+// 切换视图时补一次刷新：识别 / 下载 / 增强任务完成后计数会变
+watch(active, () => {
+  void refreshHistoryCounts();
+});
+onUnmounted(() => {
+  stopPoll();
+  unlistenHistory?.();
+});
 </script>
 
 <template>

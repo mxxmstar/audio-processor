@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { message, Modal } from "ant-design-vue";
 import { HistoryOutlined, DeleteOutlined, FolderOpenOutlined } from "@ant-design/icons-vue";
 
@@ -168,6 +169,7 @@ async function remove(id: number) {
     await invoke("delete_history", { id });
     message.success("已删除");
     await load();
+    await emit("history-changed");
   } catch (e) {
     message.error("删除失败：" + String(e));
   }
@@ -185,6 +187,7 @@ async function removeSelected() {
     message.success(`已删除 ${ids.length} 条记录`);
     clearSelection();
     await load();
+    await emit("history-changed");
   } catch (e) {
     message.error("批量删除失败：" + String(e));
   } finally {

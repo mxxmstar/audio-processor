@@ -88,6 +88,18 @@ pub fn get_history(
     history::list(&conn, kind_ref, limit.unwrap_or(200)).map_err(|e| e.to_string())
 }
 
+/// 通用历史计数：按种类过滤（可选），返回总数。
+///
+/// 菜单徽标只需要条数；若复用 `get_history` 会因 `limit` 上限而失真。
+#[tauri::command]
+pub fn count_history(
+    app: AppHandle,
+    kind: Option<String>,
+) -> Result<i64, String> {
+    let conn = history::open_db(&history_dir(&app)).map_err(|e| e.to_string())?;
+    history::count(&conn, kind.as_deref()).map_err(|e| e.to_string())
+}
+
 /// 按 id 删除一条历史记录。
 #[tauri::command]
 pub fn delete_history(app: AppHandle, id: i64) -> Result<(), String> {
