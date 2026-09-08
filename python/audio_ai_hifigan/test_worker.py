@@ -218,6 +218,36 @@ class FindModelTests(unittest.TestCase):
                 worker.find_model("hifigan-48k", model_dir)
             self.assertEqual(raised.exception.code, "MODEL_HASH_MISMATCH")
 
+    def test_find_model_skips_hash_when_deferred(self) -> None:
+        """`sha256` 为延迟校验标记时信任来源，跳过 size / sha256 校验。
+
+        同时验证 `sample_rate` 会透出为原生采样率（22.05k 权重需下游重采样）。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            _write_weights(model_dir, FILES)
+            model_dir.joinpath("manifest.json").write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "id": "hifigan-48k",
+                                "backend": "hifigan",
+                                "name": "generator",
+                                "file": "cache/hifigan/generator",
+                                "size_bytes": 0,
+                                "sha256": worker.MODEL_HASH_DEFERRED,
+                                "sample_rate": 22050,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            spec = worker.find_model("hifigan-48k", model_dir)
+            self.assertEqual(spec.native_sample_rate, 22050)
+            self.assertEqual([name for name, _ in spec.artifacts], list(WEIGHT_NAMES))
+
     def test_find_model_detects_size_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model_dir = Path(directory)

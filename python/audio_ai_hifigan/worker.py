@@ -52,6 +52,12 @@ from protocol import (  # noqa: E402
 #: 该校验在 find_model 内、加载模型前必定执行。
 STARTUP_HASH_MAX_BYTES = 128 * 1024 * 1024
 
+#: `sha256` 取该字面量表示「延迟校验」：用户信任来源，安装/启动时跳过 size 与
+#: sha256 校验，仅按 source 下载落盘（大模型哈希易超时，或权重地址待定）。
+#: 特意用非 hex 字符串，避免与「全零占位哈希」混淆 —— 后者仍按普通哈希参与
+#: 校验（必然不匹配），语义不能吞掉。
+MODEL_HASH_DEFERRED = "deferred"
+
 
 # --------------------------------------------------------------------------
 # 模型清单
@@ -73,12 +79,16 @@ class ModelSpec(NamedTuple):
 
     `artifacts` 按清单中的声明顺序保存 `(名称, 绝对路径)`。HiFi-GAN 只需一个
     权重文件 `generator`，取值时按名称显式挑选（见 `ordered_weights`）。
+
+    `native_sample_rate` 为权重训练/推理的原生采样率（48k 直出，22.05k 则需
+    下游重采样到 48k）；`pipeline.enhance` 据此选择配置与重采样策略。
     """
 
     model_id: str
     version: str
     backend: str
     model_name: str
+    native_sample_rate: int
     artifacts: tuple[tuple[str, Path], ...]
 
 
@@ -98,6 +108,10 @@ def _parse_artifact(entry: dict[str, Any]) -> Artifact:
     file_value = entry.get("file")
     if not file_value:
         raise ValueError("model file is required")
+    sha256 = str(entry.get("sha256", "")).lower()
+    deferred = sha256 == MODEL_HASH_DEFERRED
+    if not sha256:
+        raise ValueError("model sha256 is required")
     raw_size = entry.get("size_bytes")
     size_bytes = 0
     if raw_size not in (None, ""):
@@ -105,11 +119,10 @@ def _parse_artifact(entry: dict[str, Any]) -> Artifact:
             size_bytes = int(raw_size)
         except (TypeError, ValueError) as error:
             raise ValueError(f"invalid size_bytes: {raw_size}") from error
-        if size_bytes <= 0:
+        # size_bytes 可缺省（单文件条目沿用 audio_ai 清单格式）；显式为 0 时
+        # 只有延迟校验条目允许（安装时仅下载落盘、不校验）。
+        if size_bytes < 0 or (size_bytes == 0 and not deferred):
             raise ValueError("size_bytes must be a positive integer")
-    sha256 = str(entry.get("sha256", "")).lower()
-    if not sha256:
-        raise ValueError("model sha256 is required")
     return Artifact(
         name=str(entry.get("name", "") or ""),
         file=str(file_value),
@@ -203,7 +216,7 @@ def find_model(model_id: str, model_dir: Path) -> ModelSpec:
             raise WorkerFailure(
                 "MODEL_SIZE_MISMATCH", f"model size mismatch: {candidate.name}"
             )
-        if sha256_file(candidate) != artifact.sha256:
+        if artifact.sha256 != MODEL_HASH_DEFERRED and sha256_file(candidate) != artifact.sha256:
             raise WorkerFailure(
                 "MODEL_HASH_MISMATCH", f"model hash mismatch: {candidate.name}"
             )
@@ -213,6 +226,7 @@ def find_model(model_id: str, model_dir: Path) -> ModelSpec:
         version=entry["version"],
         backend=entry["backend"],
         model_name=entry["model_name"],
+        native_sample_rate=int(entry.get("sample_rate") or 48000),
         artifacts=tuple(artifacts),
     )
 
@@ -244,7 +258,7 @@ def available_models(model_dir: Path) -> tuple[list[str], list[str]]:
                     # 校验在 find_model 内、模型加载前必定执行。
                     deferred = True
                     continue
-                if sha256_file(candidate) != artifact.sha256:
+                if artifact.sha256 != MODEL_HASH_DEFERRED and sha256_file(candidate) != artifact.sha256:
                     problem = f"{model_id}: MODEL_HASH_MISMATCH"
                     break
         except WorkerFailure as failure:

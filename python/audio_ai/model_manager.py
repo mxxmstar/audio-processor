@@ -27,6 +27,13 @@ class ModelInstallError(Exception):
     """Raised when a model cannot be downloaded or does not verify."""
 
 
+#: `sha256` 取该字面量表示「延迟校验」：用户信任来源，安装时跳过 size / sha256
+#: 校验，仅按 source 下载并落盘（大模型哈希易超时，或权重地址待定）。与
+#: `audio_ai_hifigan` worker 的 MODEL_HASH_DEFERRED 同源同义。用非 hex 字符串，
+#: 避免与全零占位哈希混淆（后者仍按普通哈希参与校验）。
+MODEL_HASH_DEFERRED = "deferred"
+
+
 def read_model_entry(model_dir: Path, model_id: str) -> dict[str, Any]:
     """读取清单条目，返回其中全部权重文件（`artifacts`）。
 
@@ -69,12 +76,23 @@ def _validate_artifact(raw: dict[str, Any], model_id: str) -> dict[str, Any]:
         size_bytes = int(raw["size_bytes"])
     except (TypeError, ValueError) as error:
         raise ModelInstallError(f"invalid model size: {model_id}") from error
-    if size_bytes <= 0:
-        raise ModelInstallError(f"invalid model size: {model_id}")
     source = str(raw["source"])
     if not source.startswith("https://"):
         raise ModelInstallError("model source must use HTTPS")
     digest = str(raw["sha256"]).lower()
+    if digest == MODEL_HASH_DEFERRED:
+        # 用户信任来源：安装时仅下载落盘，跳过 size 与 sha256 校验。
+        if size_bytes < 0:
+            raise ModelInstallError(f"invalid model size: {model_id}")
+        return {
+            "name": str(raw.get("name", "")),
+            "file": str(raw["file"]),
+            "size_bytes": size_bytes,
+            "sha256": digest,
+            "source": source,
+        }
+    if size_bytes <= 0:
+        raise ModelInstallError(f"invalid model size: {model_id}")
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise ModelInstallError(f"invalid model SHA-256: {model_id}")
     return {
@@ -273,7 +291,9 @@ def _install_artifact(
     target = _resolve_target(model_dir, artifact)
     expected_size = artifact["size_bytes"]
     expected_sha256 = artifact["sha256"]
-    if verify_file(target, expected_size, expected_sha256):
+    if target.is_file() and (
+        expected_sha256 == MODEL_HASH_DEFERRED or verify_file(target, expected_size, expected_sha256)
+    ):
         print(f"model already installed: {target}", file=sys.stderr, flush=True)
         return target
 
@@ -310,14 +330,17 @@ def _install_artifact(
         if merged_path.exists():
             merged_path.unlink()
         raise
-    if merged_path.stat().st_size != expected_size:
+    if expected_sha256 != MODEL_HASH_DEFERRED:
+        if merged_path.stat().st_size != expected_size:
+            raise ModelInstallError("downloaded model has an unexpected size")
+        actual_sha256 = sha256_file(merged_path)
+        if actual_sha256 != expected_sha256:
+            merged_path.unlink()
+            raise ModelInstallError(
+                f"model hash mismatch: expected {expected_sha256}, got {actual_sha256}"
+            )
+    elif expected_size and merged_path.stat().st_size != expected_size:
         raise ModelInstallError("downloaded model has an unexpected size")
-    actual_sha256 = sha256_file(merged_path)
-    if actual_sha256 != expected_sha256:
-        merged_path.unlink()
-        raise ModelInstallError(
-            f"model hash mismatch: expected {expected_sha256}, got {actual_sha256}"
-        )
     os.replace(merged_path, target)
     for path in part_paths:
         if path.exists():

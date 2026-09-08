@@ -230,13 +230,43 @@ def get_default_config() -> dict[str, Any]:
     """返回 48 kHz 配置（直出 48k，与 App 其它后端对齐）。
 
     来源：`FlashSR.AudioSR.Vocoder.get_vocoder_config_48k()`。若只能拿到 22.05k
-    公开 checkpoint，则改用 `get_vocoder_config()` 并在下游重采样（见计划 §3.4）。
+    公开 checkpoint，则改用 `get_config(22050)` 并在下游重采样（见计划 §3.4）。
+    """
+    return get_config(48000)
+
+
+def get_config(native_rate: int) -> dict[str, Any]:
+    """按权重原生采样率返回 HiFi-GAN 配置。
+
+    - 48000：原生 48k（FlashSR 复用检查点即此档），直出 48k，无需重采样。
+    - 22050：jik876 UNIVERSAL_LJSPEECH 公开 checkpoint（标准 hifigan_universal
+      配置，80 mel / hop 256）；重建后由 `pipeline.enhance` 重采样到 48k（§3.4）。
     """
     bootstrap_vendor_path()
     ensure_inference_only_imports()
-    from FlashSR.AudioSR.Vocoder import get_vocoder_config_48k
+    if native_rate == 48000:
+        from FlashSR.AudioSR.Vocoder import get_vocoder_config_48k
 
-    return get_vocoder_config_48k()
+        return get_vocoder_config_48k()
+    if native_rate == 22050:
+        # jik876 hifigan_universal：与 UNIVERSAL_LJSPEECH / LJSpeech 训练配置一致
+        # （Generator 用同款架构，mel 用相同参数提取，因此可直接加载该 checkpoint）。
+        return {
+            "resblock": "1",
+            "num_mels": 80,
+            "n_fft": 1024,
+            "hop_size": 256,
+            "win_size": 1024,
+            "sampling_rate": 22050,
+            "fmin": 0,
+            "fmax": 8000,
+            "upsample_rates": [8, 8, 2, 2],
+            "upsample_kernel_sizes": [16, 16, 4, 4],
+            "upsample_initial_channel": 512,
+            "resblock_kernel_sizes": [3, 7, 11],
+            "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        }
+    raise ValueError(f"unsupported HiFi-GAN native sample rate: {native_rate}")
 
 
 class _AttrDict(dict):

@@ -332,18 +332,6 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     if source_rate <= 0 or channels <= 0:
         raise WorkerFailure("UNSUPPORTED_INPUT", "invalid audio sample rate or channel count")
 
-    config = vendor_bridge.get_default_config()
-    sample_rate = config["sampling_rate"]
-
-    # 生成器输出采样率由权重/配置决定，固定为 48k（原生 48k 权重）。
-    # 22.05k 回退方案见计划 §3.4，待阶段 2 确定权重策略后接入。
-    requested_sample_rate = request.get("output_sample_rate")
-    if requested_sample_rate not in (None, sample_rate):
-        raise WorkerFailure(
-            "UNSUPPORTED_SAMPLE_RATE",
-            f"hifigan requires a {sample_rate} Hz output sample rate",
-        )
-
     # 生成器为单声道：超过两声道未定义，统一下混为 2。
     downmixed = False
     if channels > 2:
@@ -355,6 +343,18 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     spec: ModelSpec = find_model(model_id, model_dir)
     device = choose_device(str(request.get("device", "auto")))
 
+    config = vendor_bridge.get_config(spec.native_sample_rate)
+    native_rate = config["sampling_rate"]
+    # 输出固定为 48k（与 App 其它后端对齐）；原生 22.05k 权重在下游重采样到 48k。
+    TARGET_RATE = 48000
+
+    requested_sample_rate = request.get("output_sample_rate")
+    if requested_sample_rate not in (None, TARGET_RATE):
+        raise WorkerFailure(
+            "UNSUPPORTED_SAMPLE_RATE",
+            f"hifigan requires a {TARGET_RATE} Hz output sample rate",
+        )
+
     emit_progress(request_id, "load_model", PERCENT_LOAD_MODEL, message=f"loading {model_id}")
     generator_path = ordered_weights(spec, MODEL_WEIGHT_NAME)[0]
     runner = get_runner(generator_path, device, config)
@@ -362,7 +362,7 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     if cancel_event.is_set():
         raise WorkerFailure("CANCELLED", "processing cancelled")
 
-    audio = decode_audio(input_path, sample_rate, channels)
+    audio = decode_audio(input_path, native_rate, channels)
     frames = audio.shape[1]
     if frames <= 0:
         raise WorkerFailure("UNSUPPORTED_INPUT", "input audio contains no samples")
@@ -376,7 +376,7 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     else:
         emit_progress(request_id, "prepare_input", PERCENT_PREPARE, message="解码完成，提取 mel")
 
-    total_seconds = frames / sample_rate
+    total_seconds = frames / native_rate
     predicted_channels: list[np.ndarray] = []
     for ch in range(audio.shape[0]):
         if cancel_event.is_set():
@@ -397,6 +397,22 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     if not np.isfinite(predicted).all():
         raise WorkerFailure("OUTPUT_INVALID", "reconstructed output contains NaN or Inf")
 
+    # 若权重原生采样率不是 48k（如 22.05k），重建后重采样到目标 48k（计划 §3.4）。
+    if native_rate != TARGET_RATE:
+        from scipy.signal import resample_poly
+
+        resampled = [
+            resample_poly(predicted[ch], TARGET_RATE, native_rate)
+            for ch in range(predicted.shape[0])
+        ]
+        predicted = np.stack(resampled, axis=0)
+        emit_progress(
+            request_id,
+            "resample",
+            (PERCENT_INFERENCE_START + PERCENT_INFERENCE_SPAN + PERCENT_WRITE_OUTPUT) / 2,
+            message=f"重采样 {native_rate}→{TARGET_RATE} Hz",
+        )
+
     sink = PcmChunkWriter(channels)
     sink.write(predicted)
     sink.close()
@@ -412,11 +428,11 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     emit_progress(request_id, "write_output", PERCENT_WRITE_OUTPUT, message="writing AI master")
     log(
-        f"encode start: output={output_path} rate={sample_rate} "
+        f"encode start: output={output_path} rate={TARGET_RATE} "
         f"channels={channels} gain={gain:.6f} peak={peak:.6f}"
     )
     try:
-        encode_pcm_file(sink.path, output_path, sample_rate, channels, gain=gain)
+        encode_pcm_file(sink.path, output_path, TARGET_RATE, channels, gain=gain)
     finally:
         sink.discard()
     written = Path(output_path).stat().st_size if Path(output_path).is_file() else -1
@@ -434,8 +450,8 @@ def enhance(request: dict[str, Any], cancel_event: threading.Event) -> dict[str,
         "output_path": output_path,
         "model_id": model_id,
         "model_version": spec.version,
-        "sample_rate": sample_rate,
+        "sample_rate": TARGET_RATE,
         "channels": channels,
-        "duration_seconds": out_frames / sample_rate,
+        "duration_seconds": out_frames / TARGET_RATE,
         "peak_db": float(20.0 * np.log10(max(peak, 1e-8))),
     }

@@ -423,15 +423,74 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 
 ---
 
+## 4.6 阶段 3.5 实施记录（2026-09-08 · 权重策略与采样率自适应）
+
+### 4.6.1 权重策略决策（R3 / §3.5 结论）
+
+**采用 22.05k 公开 checkpoint + 重建后重采样到 48k（§3.4 回退方案）。**
+
+选型过程实测（本构建环境）：
+
+| 候选 | 结论 |
+|---|---|
+| 原生 48k 训练权重 | vendor 内无；公开渠道（jik876）**仅有 22.05k / 24k**，无原生 48k |
+| jik876 UNIVERSAL_LJSPEECH（22.05k，HuggingFace `jik876/hifi-gan`） | 架构与本 Worker 的 `Generator_old` 完全匹配（标准 hifigan_universal：`num_mels=80` / `hop=256` / `upsample_rates=[8,8,2,2]` / `upsample_initial_channel=512`），**为正确目标权重**；但本构建环境访问返回 **401 Unauthorized**（镜像受限），GitHub raw 同源路径 404，故**无法在此下载并锁定 sha256/size** |
+| FlashSR `sr_vocoder.pth`（已随 FlashSR 权重落盘、可访问） | **不是 HiFi-GAN**：其 state_dict 键为 `audio_block.downsamples.*`（FlashSR 自研 GAN 声码器），与 `Generator_old` 无任何 `conv_pre` / `ups` / `resblocks` 结构，强行加载报 `Missing key(s)` + shape 不匹配 → 不可用作替代权重 |
+
+结论：权重策略按用户决策取 22.05k + 重采样；因本环境无法取回校验值，manifest 采用
+**延迟校验**条目（见 4.6.2），由用户在可达网络环境点「安装模型」取回。
+
+### 4.6.2 交付物
+
+| 文件 | 改动 |
+|---|---|
+| `python/audio_ai_hifigan/vendor_bridge.py` | 新增 `get_config(native_rate)`：`48000` → `get_vocoder_config_48k()`（原生 48k 直出）；`22050` → jik876 标准 hifigan_universal 配置；其余抛错。`get_default_config()` 改为 `get_config(48000)` |
+| `python/audio_ai_hifigan/pipeline.py` | `enhance` 改为**按原生采样率自适应**：`spec.native_sample_rate` → 选配置；输入按 `native_rate` 解码、mel 按 `native_rate` 提取、生成器直出 `native_rate`；若 `native_rate != 48000` 则用 `scipy.signal.resample_poly` 逐声道重采样到 48k；编码与 `result.sample_rate` 固定 48000。`output_sample_rate` 只接受 `None` / `48000` |
+| `python/audio_ai_hifigan/worker.py` | `ModelSpec` 新增 `native_sample_rate`（取 manifest `sample_rate`，缺省 48000）；新增 `MODEL_HASH_DEFERRED = "deferred"`：`_parse_artifact` / `find_model` / `available_models` 遇该标记跳过 size 与 sha256 校验 |
+| `python/audio_ai/model_manager.py` | 同样引入 `MODEL_HASH_DEFERRED = "deferred"`：`_validate_artifact` 放行（size 可为 0），`_install_artifact` 对已存在文件直接跳过、下载后跳过 size/sha256 校验仅落盘。**既有条目（flashsr / audiosr / deepfilternet）均为真实哈希，行为不变** |
+| `models/manifest.json` | `hifigan-48k` 条目改为：`file: cache/hifigan/UNIVERSAL_LJSPEECH_48k/generator`、`sample_rate: 22050`、`sha256: "deferred"`、`size_bytes: 0`、`source` = jik876 UNIVERSAL_LJSPEECH、`name: "generator"`（供 `ordered_weights` 定位） |
+| `src-tauri/src/audio_quality/ai_worker.rs` | `hifigan_real_worker_forward_pass` 权重路径改回 22.05k checkpoint（`UNIVERSAL_LJSPEECH_48k/generator`），保持 `#[ignore]`；缺权重时跳过 |
+| `python/audio_ai_hifigan/test_worker.py` | 新增 `test_find_model_skips_hash_when_deferred`（同时断言 `native_sample_rate == 22050` 透出） |
+
+> 哨兵值特意用非 hex 的 `"deferred"` 而非全零：全零是既有测试（以及占位清单）里
+> 「故意写错的哈希」，必须继续按普通哈希参与校验并报 `MODEL_HASH_MISMATCH`，
+> 两种语义不能合并。
+
+### 4.6.3 验证结果
+
+- **22.05k 架构正确性**（无需权重）：`get_config(22050)` 构建 `Generator_old` 并以
+  合成 mel（1×80×50）前向 → 输出 `(1, 1, 12800)`，恰为 `50 × hop_size(256)`，
+  与 jik876 训练配置一致 → 真实 22.05k 权重可直接加载。
+- `cargo test --lib audio_quality` → **24 passed / 2 ignored / 0 failed**。
+- `python python/audio_ai_hifigan/test_worker.py` → **17 OK**（含新增延迟校验用例）。
+- `PYTHONPATH=python python python/audio_ai/test_model_manager.py` → **9 OK**
+  （`model_manager` 延迟校验改动对既有后端无回归）。
+- 真实清单自检：`read_manifest` 解析 `hifigan-48k` 得 `sample_rate=22050`、
+  `sha256="deferred"`、`size=0`；`available_models` 返回
+  `models=[]` + `["hifigan-48k: MODEL_NOT_FOUND"]` —— 即**未安装时正确显示为不可用**，
+  安装后应变为可用。
+
+### 4.6.4 遗留项
+
+- **端到端前向仍待用户在可达网络取回权重后验证**：本构建环境对 jik876 官方镜像
+  返回 401，无法下载 → 无法实测 sha256/size、无法运行 `hifigan_real_worker_forward_pass`。
+  用户在可访问该 URL 的环境点「安装模型」后，`cargo test --ignored` 即可覆盖。
+- **口径文案**：22.05k 为「重建后重采样（非原生 48k）」，需在 `OptimizeView.vue`
+  的档位/提示文案中标注（阶段 3 的 `modelHint` 目前仅说明声码器定位，未含此口径）。
+- 若日后取得原生 48k 权重：将 manifest 的 `file` 指向该权重并把 `sample_rate` 改为
+  `48000` 即可，pipeline 会自动走直出分支（无需代码改动）。
+
+---
+
 ## 5. 风险与缺陷预登记表（R1–Rn）
 
 > 沿用 FlashSR 计划的 D-series 风格，集成过程中新增缺陷登记为 R 系列，便于回溯。
 
 | # | 现象（预期风险） | 根因 | 缓解 / 修复 |
 |---|---|---|---|
-| R1 | 输出采样率 22.05k，与 App 44.1/48k 目标冲突 | 公开 checkpoint 多为此采样率；48k 权重缺失 | 阶段 0 先确认 48k 权重；否则重采样并明示口径（§3.4） |
+| R1 | 输出采样率 22.05k，与 App 44.1/48k 目标冲突 | 公开 checkpoint 多为此采样率；原生 48k 权重缺失 | 已按 §3.4 落地：采用 22.05k checkpoint，`pipeline` 重建后用 `resample_poly` 重采样到 48k 直出（4.6）；**遗留**：`OptimizeView.vue` 文案需标注「重建后重采样（非原生 48k）」 |
 | R2 | `import UtilHiFiGanWrapper` 报 `ModuleNotFoundError` | 导入路径（HParams/DataProcess/Model.vocoder.hifigan）与 vendor 实际布局不符 | 阶段 0 写 shim / 薄封装，隔离在 `python/audio_ai_hifigan/` |
-| R3 | 权重获取失败或哈希不符 | 48k checkpoint 来源不稳定 / 下载中断 | `model_manager` 断点续传 + SHA-256 校验；manifest 锁版本 |
+| R3 | 权重获取失败或哈希不符 | 原生 48k checkpoint 来源不稳定；本构建环境访问 jik876 官方镜像返回 **401**，GitHub raw 同源路径 404，故无法取回 sha256/size | 改用 `MODEL_HASH_DEFERRED = "deferred"` 延迟校验条目：安装时跳过 size/sha256 仅按 source 落盘，用户在可达网络点「安装模型」取回（4.6.2）。已核查 FlashSR `sr_vocoder.pth` **非 HiFi-GAN**（键为 `audio_block.downsamples.*`），不可作替代权重 |
 | R4 | 依赖冲突 / 缺包 | `.venv-flashsr` 缺 librosa 等（mel 提取所需） | 实测 `.venv-flashsr` 已含；缺则补 `requirements-flashsr.txt`（与 FlashSR 共用，无新 venv） |
 | R5 | 与 FlashSR 共用 vendor 目录导致耦合 | 改 `UtilHiFiGanWrapper` 影响 FlashSR | 薄封装只读调用，不改动 vendor 源码；改动走 overlay |
 | R6 | 产品口径误用为"超分辨率" | 用户/文案误解声码器能力 | 档位命名"保真重建/神经声码器"，禁"恢复高频/无损"字样 |

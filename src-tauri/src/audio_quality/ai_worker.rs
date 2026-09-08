@@ -1219,6 +1219,8 @@ mod tests {
         };
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let cache = root.join("models").join("cache").join("hifigan");
+        // 22.05k 公开 checkpoint（jik876 UNIVERSAL_LJSPEECH）：原生 48k 权重在
+        // 构建环境不可达（官方镜像 401），采用 22.05k + 下游重采样到 48k（§3.4）。
         let generator = cache.join("UNIVERSAL_LJSPEECH_48k").join("generator");
         if !generator.is_file() {
             eprintln!("skip: missing weight {}", generator.display());

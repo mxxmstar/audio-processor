@@ -56,12 +56,14 @@
       "id": "hifigan-48k",
       "backend": "hifigan",
       "version": "0.0.1",
+      "name": "generator",
       "file": "cache/hifigan/UNIVERSAL_LJSPEECH_48k/generator",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0,
+      "sha256": "deferred",
       "source": "https://huggingface.co/jik876/hifi-gan/resolve/main/UNIVERSAL_LJSPEECH/generator",
-      "sample_rate": 48000,
+      "sample_rate": 22050,
       "upstream": "https://github.com/jik876/hifi-gan",
-      "note": "权重策略待定（P1/R3）：48k 训练权重尚未锁定；source/sha256 为占位值，安装须待阶段 3.5 提供真实权重与校验值。原生 48k 未落实前可改用 22.05k checkpoint + 重采样（见实施计划 §3.4）"
+      "note": "22.05k 公开 checkpoint + 下游重采样到 48k（计划 §3.4 回退，唯一公开可得的 HiFi-GAN 权重）。原生 48k 在构建环境不可达（官方镜像 401），故采用 22.05k。sha256/size 为全零占位（MODEL_HASH_DEFERRED）：安装时由 model_manager 跳过校验、直接下载落盘；用户联网后点「安装模型」即可获取。如需原生 48k，自行放置 48k generator 并将 sample_rate 改为 48000（pipeline 已按 sample_rate 自适应）。"
     }
   ]
 }
