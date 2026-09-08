@@ -582,6 +582,31 @@ resource tracker；此时主线程正阻塞于 `read_stdin_line()` → **死锁*
 Worker 真正退出才更新，期间进度条停在旧状态（表现为"点了取消没反应"）。现补上
 `AppHandle` 并在置标志后立即 `emit_task_progress` 一次，切到 "正在取消" 状态。
 
+### 4.6.7 补记：死锁修复后暴露的 stdout 污染（"解析 JSONL 失败"）
+
+**现象**：死锁修好后，任务立刻失败并报
+`AI Worker 协议错误: 解析 JSONL 失败: expected value at line 1 column 1`。
+
+**根因**：死锁期间 mel 模块**根本没导入成功**，故障被掩盖；死锁一修好，导入得以完成，
+上游在导入期写向 **stdout** 的三行诊断信息就冒出来了 ——
+`There is no Hparams` / `import error: torch`（实指 torchaudio）/ `import error: pydub`
+（见 `vendor/.../TorchJaekwon/Util/UtilAudio.py:11-18`）。stdout 被 JSONL 协议独占，
+混入非协议文本即让 Rust 侧解析失败。
+
+**这一点 FlashSR 早就踩过并有成熟处理**：`audio_ai_flashsr/backend.py:288`
+`import_flashsr()` 用 `contextlib.redirect_stdout` 把导入期输出改道 stderr，
+其 README 也专门记了这三行。HiFi-GAN 的 `warm_up_imports()` 漏了这一步。
+
+**修复**：`pipeline.warm_up_imports()` 用 `contextlib.redirect_stdout` 包住全部 vendor
+导入与 mel 提取器构造，捕获到的文本统一写 stderr —— 与 FlashSR 的处理保持一致。
+
+**验证**（管道起 worker）：stdout 由「10 行含 2 行非 JSON」变为 **8 行全 JSON**，
+流程 4.6 s 走完 `5% → 10% → 50% → 90% → 92.5% → 95% → result: completed`。
+
+> 教训：修好一个阻塞问题后，往往会暴露被它掩盖的下一层问题。
+> 且**本机主线程直调的验证方式同时掩盖了死锁与 stdout 污染两类问题** ——
+> 协议相关的缺陷必须用「子进程 + 管道」的真实条件验证。
+
 ---
 
 ## 5. 风险与缺陷预登记表（R1–Rn）

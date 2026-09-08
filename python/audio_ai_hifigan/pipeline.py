@@ -291,24 +291,42 @@ class PcmChunkWriter:
 
 
 def warm_up_imports() -> None:
-    """在主线程完成 vendor 与生成器类的导入，避免推理线程内死锁。
+    """在主线程完成 vendor 导入与 mel 提取器构造，避免推理线程内死锁。
 
-    与 FlashSR 同因：vendor 模块经 joblib → loky 引入 multiprocessing 的
-    resource tracker，若在线程内导入而主线程阻塞于 stdin 读取会死锁。
-    这里仅做导入与路径引导（不加载权重），权重在 `enhance` 内按模型加载。
+    两件事都必须在主线程做：
+
+    1. **防死锁**（R12）：vendor 模块经 joblib → loky 引入 multiprocessing 的
+       resource tracker，若在推理线程内首次导入，而主线程阻塞于 stdin 读取会死锁
+       （stdin 为管道时必现）。mel 提取器尤其容易漏 —— 10% 是 `prepare_input`，
+       下一步正是首次 mel 提取，故表现为「短音频也卡在 10%」。
+    2. **防污染 stdout**：上游导入期会向 **stdout** 打印诊断信息
+       （`There is no Hparams` / `import error: torch` / `import error: pydub`，
+       见 `vendor/.../TorchJaekwon/Util/UtilAudio.py`）。stdout 被 JSONL 协议独占，
+       混入非协议文本会让 Rust 侧解析失败（"解析 JSONL 失败"），
+       故统一重定向到 stderr —— 与 `audio_ai_flashsr.backend.import_flashsr()`
+       的处理一致。
+
+    这里只做导入与提取器构造，不加载权重（权重在 `enhance` 内按模型加载）。
     """
-    vendor_bridge.bootstrap_vendor_path()
-    vendor_bridge.ensure_inference_only_imports()
-    # 触发生成器类的解析，确保主线程已完成潜在重导入
-    vendor_bridge.build_generator(remove_weight_norm=True)
-    # mel 提取器同样必须在主线程完成导入与构造：`UtilAudioMelSpec` 的导入链经
-    # joblib → loky 拉起 multiprocessing 的 resource tracker，若留到推理线程内
-    # 首次导入，而主线程正阻塞于 stdin 读取，二者死锁（stdin 为管道时必现）。
-    # 这正是「短音频也卡在 10%」的根因 —— 10% 是 prepare_input，下一步就是首次
-    # mel 提取。仅构造提取器，不加载权重。
-    vendor_bridge.warm_up_mel_extractor()
-    # 重采样用到的 scipy.signal 一并预热，避免同样的线程内首次导入风险。
-    import scipy.signal  # noqa: F401
+    import contextlib
+    import io
+    import sys
+
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            vendor_bridge.bootstrap_vendor_path()
+            vendor_bridge.ensure_inference_only_imports()
+            # 触发生成器类的解析，确保主线程已完成潜在重导入
+            vendor_bridge.build_generator(remove_weight_norm=True)
+            # mel 提取器：导入链会拉起 resource tracker，且必卡在 10% 之后
+            vendor_bridge.warm_up_mel_extractor()
+            # 重采样用到的 scipy.signal 一并预热
+            import scipy.signal  # noqa: F401
+    finally:
+        noise = buffer.getvalue()
+        if noise.strip():
+            print(noise.rstrip(), file=sys.stderr, flush=True)
 
 
 def choose_device(requested: str) -> torch.device:
