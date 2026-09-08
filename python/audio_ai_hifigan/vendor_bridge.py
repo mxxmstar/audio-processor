@@ -325,11 +325,24 @@ class HiFiGanRunner:
 
         bootstrap_vendor_path()
         ensure_inference_only_imports()
-        self.generator = build_generator(self.config, self.device, remove_weight_norm=True)
+        state = None
         if generator_path:
             state = torch.load(generator_path, map_location=self.device, weights_only=False)
-            sd = state["generator"] if isinstance(state, dict) and "generator" in state else state
+        sd = state["generator"] if isinstance(state, dict) and "generator" in state else state
+
+        # 公开 checkpoint 有两种保存方式，必须先判断再决定如何建图：
+        # - 带 weight_norm 保存：键形如 `conv_pre.weight_g` / `conv_pre.weight_v`；
+        #   此时若先 remove_weight_norm 再加载会因键名不匹配而失败，须先载入仍带
+        #   weight_norm 的生成器，再 remove 将其折叠回 `weight`。
+        # - 已 remove_weight_norm 保存（如 jik876 官方 generator）：键为 `*.weight`。
+        weight_normed = sd is not None and any(str(k).endswith(".weight_g") for k in sd)
+        self.generator = build_generator(
+            self.config, self.device, remove_weight_norm=not weight_normed
+        )
+        if sd is not None:
             self.generator.load_state_dict(sd)
+            if weight_normed:
+                self.generator.remove_weight_norm()
         self.generator.eval()
         return self
 

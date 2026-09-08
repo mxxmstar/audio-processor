@@ -437,8 +437,34 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 | jik876 UNIVERSAL_LJSPEECH（22.05k，HuggingFace `jik876/hifi-gan`） | 架构与本 Worker 的 `Generator_old` 完全匹配（标准 hifigan_universal：`num_mels=80` / `hop=256` / `upsample_rates=[8,8,2,2]` / `upsample_initial_channel=512`），**为正确目标权重**；但本构建环境访问返回 **401 Unauthorized**（镜像受限），GitHub raw 同源路径 404，故**无法在此下载并锁定 sha256/size** |
 | FlashSR `sr_vocoder.pth`（已随 FlashSR 权重落盘、可访问） | **不是 HiFi-GAN**：其 state_dict 键为 `audio_block.downsamples.*`（FlashSR 自研 GAN 声码器），与 `Generator_old` 无任何 `conv_pre` / `ups` / `resblocks` 结构，强行加载报 `Missing key(s)` + shape 不匹配 → 不可用作替代权重 |
 
-结论：权重策略按用户决策取 22.05k + 重采样；因本环境无法取回校验值，manifest 采用
-**延迟校验**条目（见 4.6.2），由用户在可达网络环境点「安装模型」取回。
+### 4.6.1.1 最终解决（2026-09-08 补记：用户实测安装失败后定位）
+
+用户点「安装模型」报 `HTTP Error 401`，据此复查得到权威结论：
+
+- **jik876 官方权重只有 Google Drive 一种分发方式**：README 指向
+  `https://drive.google.com/drive/folders/1-eEYTB5Av9jNql0WGBlRoi-WH2J7bp5Y`，
+  目录名是 `UNIVERSAL_V1`（**不是** `UNIVERSAL_LJSPEECH`），交互式手动下载，无直链。
+- **GitHub 仓库不含任何权重**：`api.github.com/repos/jik876/hifi-gan/contents/`
+  只有代码与 `config_v1~v3.json`，没有任何 checkpoint 目录 —— 这解释了此前的 404。
+- **HF 的 `jik876/hifi-gan` 返回 401**，构建环境与用户环境一致；对照组
+  `hf-internal-testing/tiny-random-gpt2` 返回 206，证明并非环境 / token 问题，
+  而是**该仓库本身不开放**。
+
+→ 改用 **`jaketae/hifigan-lj-v1`**（jik876 V1 的公开可达移植）的 `pytorch_model.bin`：
+
+| 项 | 值 |
+|---|---|
+| 体积 | 55,819,885 字节 |
+| sha256 | `6265dc8996049cfe01c4e148d6ad6db1e9a1784b1978bda56fc29d74daddb5a2` |
+| 架构一致性 | `upsample_rates=[8,8,2,2]`、`upsample_initial_channel=512`、`resblock_kernel_sizes=[3,7,11]`、`resblock_dilation_sizes=[[1,3,5]]×3` —— 与本 Worker 的 22.05k 配置**逐项相同** |
+
+manifest 因此回填**真实 size / sha256**，不再是延迟校验条目。
+
+**同时修掉一个真实缺陷**：该 checkpoint 以 **weight_norm 形式**保存（键为
+`conv_pre.weight_g` / `conv_pre.weight_v`），而 `load_model` 原先无条件先
+`remove_weight_norm` 再加载，必然键名不匹配。现改为**先判断再建图**：含 `*.weight_g`
+则先载入仍带 weight_norm 的生成器，再 `remove_weight_norm()` 折叠回 `weight`；
+否则按旧路径直接加载。两种保存格式均已支持。
 
 ### 4.6.2 交付物
 
@@ -483,10 +509,11 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 
 ### 4.6.4 遗留项
 
-- **仅剩真实权重的下载与听感待验证**：链路本身已由上面的离线全链路验证覆盖；
-  本构建环境对 jik876 官方镜像返回 401，无法下载 → 无法实测 sha256/size、无法
-  运行 `hifigan_real_worker_forward_pass`。用户在可访问该 URL 的环境点「安装模型」
-  后，`cargo test --ignored` 即可覆盖真实权重的加载与产出。
+- ✅ **真实权重已落地并端到端验证**（2026-09-08）：用 `jaketae/hifigan-lj-v1`
+  的真实权重跑通完整 `enhance` —— `find_model` 校验真实 sha256 通过 →
+  `load_model` 正确折叠 weight_norm → mel → 生成 → `resample 22050→48000` → 编码，
+  `result` = `sample_rate 48000` / `channels 2` / `duration 2.9954s`（输入 3.0 s），
+  ffprobe 独立复核 `48000 / 2 / 2.995`。**仅剩听感未做主观评价**（需人耳试听）。
 - **口径文案**（已补齐）：22.05k 为「重建后重采样（非原生 48k）」，已在
   `src/OptimizeView.vue` 四处标注 —— 模型下拉描述（`desc`）、`modelHint`
   （权重原生 22050 Hz、重建后重采样到 48000 Hz）、采样率选项标签
