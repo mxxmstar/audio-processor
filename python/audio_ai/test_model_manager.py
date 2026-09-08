@@ -150,6 +150,66 @@ class ModelManagerTests(unittest.TestCase):
                 install_model(model_dir, "flashsr")
             second.assert_not_called()
 
+    def _write_deferred_entry(self, model_dir: Path) -> None:
+        """延迟校验条目：sha256 为哨兵、size 为 0（无法预先锁定校验值时）。
+
+        HiFi-GAN 的 jik876 权重在构建环境不可达，只能信任来源安装，故该路径
+        必须可用且不能因「size 0」被判非法或反复重下。
+        """
+        _write_manifest(
+            model_dir,
+            [
+                {
+                    "id": "hifigan-48k",
+                    "backend": "hifigan",
+                    "file": "cache/hifigan/generator",
+                    "size_bytes": 0,
+                    "sha256": "deferred",
+                    "source": "https://example.invalid/generator",
+                }
+            ],
+        )
+
+    def test_install_model_accepts_deferred_hash_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            target = model_dir / "cache" / "hifigan" / "generator"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"generator-bytes")
+            self._write_deferred_entry(model_dir)
+
+            entry = read_model_entry(model_dir, "hifigan-48k")
+            self.assertEqual(entry["artifacts"][0]["sha256"], "deferred")
+
+            # 已存在文件：应直接跳过，绝不重新下载（哨兵无法通过哈希校验）
+            with patch(
+                "audio_ai.model_manager._download_parts",
+                side_effect=AssertionError("deferred entry must not re-download"),
+            ):
+                installed = install_model(model_dir, "hifigan-48k")
+            self.assertEqual([path.name for path in installed], ["generator"])
+
+    def test_install_model_downloads_deferred_entry_without_hash_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            self._write_deferred_entry(model_dir)
+
+            def fake_download(
+                source: str, part_path: Path, *args: object, **kwargs: object
+            ) -> list[Path]:
+                part_path.parent.mkdir(parents=True, exist_ok=True)
+                part_path.write_bytes(b"downloaded-generator")  # 与清单哈希无关
+                return [part_path]
+
+            with patch("audio_ai.model_manager._download_parts", side_effect=fake_download):
+                installed = install_model(model_dir, "hifigan-48k")
+
+            self.assertEqual(
+                (model_dir / "cache/hifigan/generator").read_bytes(),
+                b"downloaded-generator",
+            )
+            self.assertEqual([path.name for path in installed], ["generator"])
+
     def test_install_model_resumes_after_partial_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model_dir = Path(directory)

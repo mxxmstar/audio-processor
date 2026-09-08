@@ -199,6 +199,35 @@ def _download_range(
     raise ModelInstallError("download failed")
 
 
+def _download_whole(source: str, target: Path, retries: int, chunk_bytes: int) -> None:
+    """整段下载（体积未知，用于延迟校验条目）。
+
+    没有预期 Content-Length 时无法做分片 Range 请求，退化为单次 GET 顺序写盘。
+    重试即整段重下（未知体积无法断点续传）。
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(max(1, retries)):
+        try:
+            with urllib.request.urlopen(source, timeout=60) as response:
+                with target.open("wb") as destination:
+                    while True:
+                        block = response.read(chunk_bytes)
+                        if not block:
+                            break
+                        destination.write(block)
+            return
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError) as error:
+            if attempt + 1 == retries:
+                raise ModelInstallError(str(error)) from error
+            print(
+                f"download interrupted, retrying ({attempt + 1}/{retries}): {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(1.0 + attempt)
+    raise ModelInstallError("download failed")
+
+
 def _download_parts(
     source: str,
     part_path: Path,
@@ -208,6 +237,11 @@ def _download_parts(
     chunk_bytes: int,
     workers: int,
 ) -> list[Path]:
+    if expected_size <= 0:
+        # 体积未知（延迟校验条目）：无法分片，退化为整段下载。
+        _download_whole(source, part_path, retries, chunk_bytes)
+        return [part_path]
+
     ranges: list[tuple[int, int, Path]] = []
     start = 0
     index = 0
@@ -314,14 +348,16 @@ def _install_artifact(
     try:
         with merged_path.open("wb") as merged:
             for index, path in enumerate(part_paths):
-                expected_part_size = min(
-                    DEFAULT_RANGE_BYTES,
-                    expected_size - index * DEFAULT_RANGE_BYTES,
-                )
-                if not path.is_file() or path.stat().st_size != expected_part_size:
-                    raise ModelInstallError(
-                        f"downloaded model part is incomplete: {path.name}"
+                # 体积未知（延迟校验）时无从推算分片大小，跳过该校验。
+                if expected_size:
+                    expected_part_size = min(
+                        DEFAULT_RANGE_BYTES,
+                        expected_size - index * DEFAULT_RANGE_BYTES,
                     )
+                    if not path.is_file() or path.stat().st_size != expected_part_size:
+                        raise ModelInstallError(
+                            f"downloaded model part is incomplete: {path.name}"
+                        )
                 with path.open("rb") as source:
                     shutil.copyfileobj(source, merged, length=chunk_bytes)
             merged.flush()

@@ -447,7 +447,7 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 | `python/audio_ai_hifigan/vendor_bridge.py` | 新增 `get_config(native_rate)`：`48000` → `get_vocoder_config_48k()`（原生 48k 直出）；`22050` → jik876 标准 hifigan_universal 配置；其余抛错。`get_default_config()` 改为 `get_config(48000)` |
 | `python/audio_ai_hifigan/pipeline.py` | `enhance` 改为**按原生采样率自适应**：`spec.native_sample_rate` → 选配置；输入按 `native_rate` 解码、mel 按 `native_rate` 提取、生成器直出 `native_rate`；若 `native_rate != 48000` 则用 `scipy.signal.resample_poly` 逐声道重采样到 48k；编码与 `result.sample_rate` 固定 48000。`output_sample_rate` 只接受 `None` / `48000` |
 | `python/audio_ai_hifigan/worker.py` | `ModelSpec` 新增 `native_sample_rate`（取 manifest `sample_rate`，缺省 48000）；新增 `MODEL_HASH_DEFERRED = "deferred"`：`_parse_artifact` / `find_model` / `available_models` 遇该标记跳过 size 与 sha256 校验 |
-| `python/audio_ai/model_manager.py` | 同样引入 `MODEL_HASH_DEFERRED = "deferred"`：`_validate_artifact` 放行（size 可为 0），`_install_artifact` 对已存在文件直接跳过、下载后跳过 size/sha256 校验仅落盘。**既有条目（flashsr / audiosr / deepfilternet）均为真实哈希，行为不变** |
+| `python/audio_ai/model_manager.py` | 同样引入 `MODEL_HASH_DEFERRED = "deferred"`：`_validate_artifact` 放行（size 可为 0），`_install_artifact` 对已存在文件直接跳过、下载后跳过 size/sha256 校验仅落盘。体积未知（size=0）时无法做分片 Range 请求，新增 `_download_whole` 退化为整段 GET 下载，并跳过分片大小校验。**既有条目（flashsr / audiosr / deepfilternet）均为真实哈希，行为不变** |
 | `models/manifest.json` | `hifigan-48k` 条目改为：`file: cache/hifigan/UNIVERSAL_LJSPEECH_48k/generator`、`sample_rate: 22050`、`sha256: "deferred"`、`size_bytes: 0`、`source` = jik876 UNIVERSAL_LJSPEECH、`name: "generator"`（供 `ordered_weights` 定位） |
 | `src-tauri/src/audio_quality/ai_worker.rs` | `hifigan_real_worker_forward_pass` 权重路径改回 22.05k checkpoint（`UNIVERSAL_LJSPEECH_48k/generator`），保持 `#[ignore]`；缺权重时跳过 |
 | `python/audio_ai_hifigan/test_worker.py` | 新增 `test_find_model_skips_hash_when_deferred`（同时断言 `native_sample_rate == 22050` 透出） |
@@ -461,10 +461,21 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 - **22.05k 架构正确性**（无需权重）：`get_config(22050)` 构建 `Generator_old` 并以
   合成 mel（1×80×50）前向 → 输出 `(1, 1, 12800)`，恰为 `50 × hop_size(256)`，
   与 jik876 训练配置一致 → 真实 22.05k 权重可直接加载。
+- **离线全链路验证**（无需真实权重，关键证据）：把「随机初始化的 22.05k Generator」
+  存成权重文件（架构与 jik876 一致），配 `sample_rate=22050` 的清单条目跑完整
+  `enhance`，成功走完 `load_model → prepare_input → inference → **resample
+  22050→48000** → write_output`；`result` = `sample_rate 48000` / `channels 2` /
+  `duration 2.9954s`（输入 3.0 s，差值为 mel 帧量化），ffprobe 独立复核
+  `48000 / 2 / 2.995`。→ **解码 → mel → 生成 → 重采样 → 48k 编码整条链已验证可用**，
+  剩余未知仅是真实权重的下载加载与听感。
 - `cargo test --lib audio_quality` → **24 passed / 2 ignored / 0 failed**。
 - `python python/audio_ai_hifigan/test_worker.py` → **17 OK**（含新增延迟校验用例）。
-- `PYTHONPATH=python python python/audio_ai/test_model_manager.py` → **9 OK**
-  （`model_manager` 延迟校验改动对既有后端无回归）。
+- `PYTHONPATH=python python python/audio_ai/test_model_manager.py` → **11 OK**
+  （新增 2 条延迟校验用例；`model_manager` 延迟校验改动对既有后端无回归）。
+  其中「下载后落盘」用例**暴露并修正了一个真实缺陷**：体积未知时
+  `_download_parts` 的 `while start < expected_size` 不会下载任何分片，且合并时
+  按 `expected_size=0` 推算分片大小必然判 `incomplete` —— 即用户点「安装模型」
+  会直接失败。已修复为整段下载 + 跳过分片校验。
 - 真实清单自检：`read_manifest` 解析 `hifigan-48k` 得 `sample_rate=22050`、
   `sha256="deferred"`、`size=0`；`available_models` 返回
   `models=[]` + `["hifigan-48k: MODEL_NOT_FOUND"]` —— 即**未安装时正确显示为不可用**，
@@ -472,9 +483,10 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 
 ### 4.6.4 遗留项
 
-- **端到端前向仍待用户在可达网络取回权重后验证**：本构建环境对 jik876 官方镜像
-  返回 401，无法下载 → 无法实测 sha256/size、无法运行 `hifigan_real_worker_forward_pass`。
-  用户在可访问该 URL 的环境点「安装模型」后，`cargo test --ignored` 即可覆盖。
+- **仅剩真实权重的下载与听感待验证**：链路本身已由上面的离线全链路验证覆盖；
+  本构建环境对 jik876 官方镜像返回 401，无法下载 → 无法实测 sha256/size、无法
+  运行 `hifigan_real_worker_forward_pass`。用户在可访问该 URL 的环境点「安装模型」
+  后，`cargo test --ignored` 即可覆盖真实权重的加载与产出。
 - **口径文案**（已补齐）：22.05k 为「重建后重采样（非原生 48k）」，已在
   `src/OptimizeView.vue` 四处标注 —— 模型下拉描述（`desc`）、`modelHint`
   （权重原生 22050 Hz、重建后重采样到 48000 Hz）、采样率选项标签
