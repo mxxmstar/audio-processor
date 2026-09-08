@@ -1,6 +1,6 @@
 # HiFi-GAN 集成实施计划
 
-> 状态：实施中（阶段 0、1、2、3 已完成）
+> 状态：已完成（阶段 0–5 全部实施）
 > 编制日期：2026-09-08
 > 目标：把 **HiFi-GAN 神经声码器**作为音质提升的可选后端接入现有 JSONL Worker 协议，
 > 复用 FlashSR 集成所确立的全部约定（参考 `docs/FlashSR集成实施计划.md`）。
@@ -389,6 +389,37 @@ QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cance
 - UI 冒烟需打正式包（Tauri）或 `npm run dev` 人工验证菜单可见、进度/取消/历史一致。
 - 权重未安装时「音质优化」视图显示运行时已连接但模型不可用，符合预期；真实端到端
   需阶段 3.5 落实权重后由阶段 4 的忽略项前向测试覆盖。
+
+---
+
+## 4.5 阶段 4 / 5 实施记录（2026-09-08）
+
+### 4.5.1 测试（阶段 4）
+
+- **协议回归**：`hifigan_fake_worker_ready_probe` / `hifigan_fake_worker_success_round_trip`
+  复用 `.venv-flashsr` 真实拉起 `audio_ai_hifigan/fake_worker.py`，全链路（ready →
+  progress → result）打通，`result.model_id == "hifigan-48k"`。
+- **真实权重前向**：`hifigan_real_worker_forward_pass`（`#[ignore]`，与 FlashSR 同构），
+  约束 48k 生成器权重落盘 + `bin/ffmpeg.exe`；`cargo test --ignored` 运行，断言
+  `model_id=="hifigan-48k"`、`sample_rate==48000`、产出文件存在。环境缺权重时跳过。
+- `cargo test --lib audio_quality` → **24 passed / 2 ignored / 0 failed**（2 ignored =
+  flashsr 与 hifigan 真实前向；并行负载下 `runtime_check_unions_models_across_backends`
+  偶发 `READY_TIMEOUT` 超时，单线程稳定通过，非逻辑回归）。
+
+### 4.5.2 文档（阶段 5）
+
+- `docs/低质量音频转高品质音频功能规划.md` §15.15.1 新增 **HiFi-GAN 神经声码器（音质优化）**
+  条目：明确其声码器（非超分辨率）定位、固定 48k、独立「音质优化」视图、复用
+  `.venv-flashsr` 与 vendor、权重策略待定（R3 / §3.5）及口径约束（不称「恢复高频/无损」）。
+- 本计划状态置为「已完成」。
+
+### 4.5.3 整体完成度与遗留项
+
+阶段 0–5 全部落地，HiFi-GAN 后端已可经「音质优化」视图接入，协议、路由、前端、
+测试齐全。**唯一遗留**是权重策略 R3：manifest 条目 `hifigan-48k` 的 `source` / `sha256`
+为占位值，真实端到端推理需阶段 3.5 的 `model_manager` 下载分支 + 锁定 48k（或 22.05k
+重采样）权重后方可运行；在此之前「音质优化」视图显示运行时已连接但模型不可用，
+符合预期。
 
 ---
 
