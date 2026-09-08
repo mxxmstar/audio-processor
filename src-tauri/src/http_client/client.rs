@@ -519,31 +519,22 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_get_config() {
+    async fn test_get_returns_status_and_body() {
+        // 原先这里是写死内网地址 192.168.66.83:8080 的调试用例：既无断言，又依赖
+        // 内网环境（离线/CI 上只能等连接超时）。改为本地 mock server 后，真正覆盖
+        // 了 get() 的状态码、响应体与 json() 便捷方法，且不依赖外部环境。
+        let payload = r#"{"code":0,"message":"ok"}"#;
+        let url = spawn_file_server(payload.as_bytes().to_vec()).await;
+
         let client = HttpClient::new();
+        let response = client.get(&url).await.expect("GET 本地 mock 应成功");
 
-        let url = "http://192.168.66.83:8080/config";
-        println!("\n========== 发送 getConfig 请求 ==========");
-        println!("请求地址: {}", url);
+        assert_eq!(response.status, 200);
+        assert!(response.is_success());
+        assert_eq!(response.body, payload);
 
-        match client.get(url).await {
-            Ok(response) => {
-                println!("\n========== 请求成功 ==========");
-                println!("状态码: {}", response.status);
-                println!("响应头:");
-                for (key, value) in &response.headers {
-                    println!("  {}: {}", key, value);
-                }
-                // println!("\n响应体:");
-                // println!("{}", response.body);
-                println!("\n======================================\n");
-            }
-            Err(e) => {
-                println!("\n========== 请求失败 ==========");
-                println!("错误信息: {}", e);
-                println!("\n======================================\n");
-            }
-        }
+        let parsed: serde_json::Value = response.json().expect("响应体应能解析为 JSON");
+        assert_eq!(parsed["code"], 0);
     }
 
     /// 启动一个本地 TCP server，返回指定大小的固定内容，用于测试流式下载。
