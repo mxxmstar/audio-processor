@@ -1,6 +1,6 @@
 # HiFi-GAN 集成实施计划
 
-> 状态：实施中（阶段 0、1、2 已完成）
+> 状态：实施中（阶段 0、1、2、3 已完成）
 > 编制日期：2026-09-08
 > 目标：把 **HiFi-GAN 神经声码器**作为音质提升的可选后端接入现有 JSONL Worker 协议，
 > 复用 FlashSR 集成所确立的全部约定（参考 `docs/FlashSR集成实施计划.md`）。
@@ -360,6 +360,35 @@ python/audio_ai/model_manager.py         （显式断点下载 + SHA-256 校验�
   `hifigan-48k` 的安装会失败（manifest 占位 `source`）。
 - 22.05k 公开 checkpoint 的「重采样回退」（§3.4）在权重策略确定为 22.05k 时再接入
   `pipeline`（届时按 manifest `sample_rate` 选配置与解码率）。
+
+---
+
+## 4.4 阶段 3 实施记录（2026-09-08）
+
+### 4.4.1 交付物（前端入口，独立子菜单）
+
+| 文件 | 改动 |
+|---|---|
+| `src/OptimizeView.vue` | 新增视图：以 `QualityView.vue` 为模板，`modelId` 固定 `hifigan-48k`、仅暴露 HiFi-GAN 后端；`backendOf` 识别 `hifigan` 前缀；`isFixed48k` 含 hifigan（输出锁定 48 kHz）；`modelHint` 标明「神经声码器 / 保真重建，不提升高频」；`checkRuntime` 不做跨后端回退（未安装时保留 hifigan-48k 以便「安装模型」） |
+| `src/App.vue` | `音频品质提升` 父菜单下新增同级子项 `{ key: "optimize", label: "音质优化" }`；`leafKeys` 与 `ViewKey` 联合类型加入 `"optimize"`；渲染 `<optimize-view v-else-if="active === 'optimize'">` |
+
+要点（对齐 §3.6）：「音质优化」是**独立视图**，与「音质提升」平级、不嵌套；后端调用与
+QualityView 完全一致（`audio_quality_check_ai_runtime` / `_start` / `_cancel` / `_list_tasks`），
+仅默认/限定模型为 HiFi-GAN；优化任务的输出进入既有的「音质提升」历史记录表（kind `enhance`），
+不新增独立历史菜单项。
+
+### 4.4.2 验证结果
+
+- `npm run build`（Vite 生产构建）→ **3179 modules transformed，built in ~30s，无错误**，
+  `OptimizeView.vue` 与 `App.vue` 的菜单/渲染接线编译通过。
+- 静态核对：`leafKeys` 含 `optimize` 保证点击切换主视图；`quality-group` 下 `quality` /
+  `optimize` / `quality-history` 三者同级，满足「不在音质提升中加选项」的口径要求。
+
+### 4.4.3 待办（延续到阶段 4 / 5）
+
+- UI 冒烟需打正式包（Tauri）或 `npm run dev` 人工验证菜单可见、进度/取消/历史一致。
+- 权重未安装时「音质优化」视图显示运行时已连接但模型不可用，符合预期；真实端到端
+  需阶段 3.5 落实权重后由阶段 4 的忽略项前向测试覆盖。
 
 ---
 

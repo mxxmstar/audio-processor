@@ -6,6 +6,7 @@ import RecognizerView from "./RecognizerView.vue";
 import HistoryView from "./HistoryView.vue";
 import Aria2View from "./Aria2View.vue";
 import QualityView from "./QualityView.vue";
+import OptimizeView from "./OptimizeView.vue";
 import PortCheckView from "./PortCheckView.vue";
 import {
   DownloadOutlined,
@@ -28,6 +29,7 @@ type ViewKey =
   | "aria2-history"
   | "quality"
   | "quality-history"
+  | "optimize"
   | "port-check";
 const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
@@ -68,6 +70,7 @@ const items = [
     label: "音频品质提升",
     children: [
       { key: "quality", icon: h(SoundOutlined), label: "音质提升" },
+      { key: "optimize", icon: h(SoundOutlined), label: "音质优化" },
       { key: "quality-history", icon: h(HistoryOutlined), label: "历史记录" },
     ],
   },
@@ -88,6 +91,7 @@ const leafKeys: string[] = [
   "aria2-history",
   "quality",
   "quality-history",
+  "optimize",
   "port-check",
 ];
 
@@ -272,6 +276,7 @@ onUnmounted(stopPoll);
           kind="aria2"
         />
         <quality-view v-else-if="active === 'quality'" key="view-quality" />
+        <optimize-view v-else-if="active === 'optimize'" key="view-optimize" />
         <history-view
           v-else-if="active === 'quality-history'"
           key="view-history-quality"
