@@ -175,6 +175,17 @@
       "sha256": "1fd8fed99684bd271db55563e4906d36459cf535446820053f7a1081d4781dc5",
       "source": "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_PSNR.pth",
       "upstream": "https://github.com/JingyunLiang/SwinIR"
-    }
-  ]
+      },
+      {
+      "id": "gfpgan-v1.4",
+      "backend": "gfpgan",
+      "model_name": "GFPGANv1.4",
+      "version": "v1.3.4",
+      "scale": 2,
+      "file": "cache/gfpgan/GFPGANv1.4.pth",
+      "sha256": "deferred",
+      "source": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth",
+      "upstream": "https://github.com/TencentARC/GFPGAN"
+      }
+      ]
 }

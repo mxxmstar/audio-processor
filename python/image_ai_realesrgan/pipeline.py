@@ -444,12 +444,78 @@ class SwinIRRunner(RealESRGANRunner):
                 )
         return self._crop_mod_pad(out_np)
 
+class GFPGANRunner(RealESRGANRunner):
+    """GFPGAN 人脸修复后端：复用进程/协议框架，仅替换网络为 GFPGANer。
+
+    原生输出为修复后的 ×`scale` 人脸图（`paste_back` 贴回原图）；无人脸时回退到
+    LANCZOS ×`scale` 放大，保证输出尺寸语义与超分后端一致。倍数缩放仍由
+    `enhance` 的二次 LANCZOS 机制处理。
+    """
+
+    def __init__(self, model_path: str, model_name: str, scale: int, device: torch.device) -> None:
+        from gfpgan import GFPGANer
+
+        self.model = GFPGANer(
+            model_path=model_path,
+            upscale=scale,
+            arch="clean",
+            channel_multiplier=2,
+            bg_upsampler=None,
+            device=device,
+        )
+        self.scale = scale
+        self.device = device
+        self.img: Any = None
+        self.mod_pad_h = 0
+        self.mod_pad_w = 0
+
+    def upscale(
+        self,
+        img: np.ndarray,
+        cancel_event: threading.Event,
+        request_id: str,
+        out_format: str,
+        tile: int | None = None,
+    ) -> np.ndarray:
+        if cancel_event.is_set():
+            raise WorkerFailure("CANCELLED", "处理已取消")
+        _, _, restored = self.model.enhance(
+            img,
+            has_aligned=False,
+            only_center_face=False,
+            paste_back=True,
+        )
+        if restored is None:
+            h, w = img.shape[:2]
+            return cv2.resize(img, (w * self.scale, h * self.scale), interpolation=cv2.INTER_LANCZOS4)
+        return restored
+
+
+def _get_gfpgan_runner(spec: "worker.ModelSpec", device: torch.device) -> GFPGANRunner:
+    weight_path = str(spec.artifacts[0][1])
+    key = (weight_path, spec.model_name, int(spec.scale), str(device))
+    with _RUNNER_LOCK:
+        runner = _RUNNER_CACHE.get(key)
+        if runner is None:
+            runner = GFPGANRunner(
+                model_path=weight_path,
+                model_name=spec.model_name,
+                scale=int(spec.scale),
+                device=device,
+            )
+            _RUNNER_CACHE[key] = runner
+        return runner
+
+
 def get_runner(spec: "worker.ModelSpec", device: torch.device) -> RealESRGANRunner:
     """按 (权重路径, 模型名, 倍数, 设备) 缓存已加载的模型，避免重复加载。
 
     按 `spec.backend` 选择后端：realesrgan 走 `RealESRGANRunner`，swinir 走
-    `SwinIRRunner`；两者接口一致（`upscale` 同签名），`enhance` 无需区分。
+    `SwinIRRunner`，gfpgan 走 `GFPGANRunner`；三者接口一致（`upscale` 同签名），
+    `enhance` 无需区分。
     """
+    if spec.backend == "gfpgan":
+        return _get_gfpgan_runner(spec, device)
     if spec.backend == "swinir":
         return _get_swinir_runner(spec, device)
     weight_path = str(spec.artifacts[0][1])

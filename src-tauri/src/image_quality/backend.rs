@@ -15,6 +15,7 @@ pub const REALESRGAN_SCALE: u32 = 4;
 pub enum Backend {
     RealEsrGan,
     SwinIr,
+    GfpGan,
     Unknown,
 }
 
@@ -23,6 +24,7 @@ impl Backend {
         match self {
             Backend::RealEsrGan => "realesrgan",
             Backend::SwinIr => "swinir",
+            Backend::GfpGan => "gfpgan",
             Backend::Unknown => "unknown",
         }
     }
@@ -32,11 +34,14 @@ impl Backend {
         match value {
             "realesrgan" => Backend::RealEsrGan,
             "swinir" => Backend::SwinIr,
+            "gfpgan" => Backend::GfpGan,
             other => {
                 if other.contains("realesrgan") {
                     Backend::RealEsrGan
                 } else if other.contains("swinir") {
                     Backend::SwinIr
+                } else if other.contains("gfpgan") {
+                    Backend::GfpGan
                 } else {
                     Backend::Unknown
                 }
@@ -88,7 +93,7 @@ pub fn list_models() -> Vec<ModelInfo> {
             .filter(|entry| {
                 matches!(
                     Backend::parse(&entry.backend),
-                    Backend::RealEsrGan | Backend::SwinIr
+                    Backend::RealEsrGan | Backend::SwinIr | Backend::GfpGan
                 )
             })
             .map(|entry| ModelInfo {
