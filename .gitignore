@@ -14,6 +14,7 @@ dist/
 .venv/
 .venv-flashsr/
 .venv-realesrgan/
+.venv-voicefixer/
 # Python 字节码
 __pycache__/
 *.pyc

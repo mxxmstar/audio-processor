@@ -1,6 +1,6 @@
 # 音频修复增强 · NuWave2 & VoiceFixer 集成实施计划
 
-> 状态：规划中（待评审）
+> 状态：**阶段 0 已完成**（2026-09-09，环境/权重/缓存/性能均已实测，见 §4.1）；阶段 1 待实施
 > 编制日期：2026-09-09
 > 目标：评估并为 **NuWave2**（通用音频上采样）与 **VoiceFixer**（语音综合修复）两个后端
 > 制定接入方案，补齐现有"只能升采样 / 只能降噪"的能力缺口。
@@ -240,12 +240,75 @@ VoiceFixer 属于"音频品质提升"域，**直接加进既有的 `QualityView.
 
 | 阶段 | 内容 | 交付 |
 |---|---|---|
-| **0 · 可行性验证** | 建 `.venv-voicefixer`（或验证能否复用现有 venv）；`pip install voicefixer`；**验证缓存目录可重定向到 `models/cache/`**；CPU 跑通一次 mode 0；实测耗时/内存 | 环境 OK + 实测数据回填 + 缓存方案定稿 |
+| **0 · 可行性验证** ✅ **已完成 2026-09-09** | 建 `.venv-voicefixer`（或验证能否复用现有 venv）；`pip install voicefixer`；**验证缓存目录可重定向到 `models/cache/`**；CPU 跑通一次 mode 0；实测耗时/内存 | 环境 OK + 实测数据回填 + 缓存方案定稿（见 §4.1） |
 | **1 · Python 模块** | 照 §3.2 建 `python/audio_ai_voicefixer/`；`pipeline.py` 实现 mode 分派 + 分块进度/取消；fake / selfcheck / test 齐备 | 可 `ready` 握手、fake 可跑 |
 | **2 · Rust 侧** | `backend.rs` 新增 `VoiceFixer` 枚举与路由；`ai_worker.rs` 新增 `WorkerSpec::voicefixer()` + `find_python_voicefixer()`；`manifest.json` 条目 | 运行时检查可见、可安装 |
 | **3 · 前端** | §3.6 下拉档位 + mode 选择 + 采样率联动 | 可选、可取消、进度可见 |
 | **4 · 测试** | fake 协议回归；真实权重修复用例（含噪声/削波/低带宽样本）；UI 冒烟 | 测试通过 |
 | **5 · NuWave2 评估** | 评估 NuWave2 是否值得做（对比 AudioSR 的差异化价值、Google Drive 权重方案、旧版 lightning 环境可行性）→ 决定实现或搁置 | 评估结论；若实施则复用阶段 1–4 流程 |
+
+### 4.1 阶段 0 实测结论（2026-09-09，验证机：Python 3.10 / CPU / 无 GPU / 12 线程）
+
+**环境**：`.venv-voicefixer`（`torch==2.14.0+cpu` + `voicefixer==0.1.3`），依赖清单见 `requirements-voicefixer.txt`。
+
+**① 权重获取（修正 §3.4 / R6 相关前提）**
+
+- 官方文档给的 **Zenodo 直链（`zenodo.org/record/5600188/...`）在本机返回 403**，不可用。
+- 实测可用的公开镜像：**Hugging Face `Diogodiogod/voicefixer-models`**（两文件同名，HTTP 200，支持断点续传）：
+
+| 文件 | 大小 | SHA-256 |
+|---|---|---|
+| `vf.ckpt`（分析模块） | 489,307,071 B（466.7 MB） | `748411b70089cadf34a6c11054f95f3a454e614af562c23b13a82f6cb413109f` |
+| `model.ckpt-1490000_trimed.pt`（声码器 44100） | 135,613,039 B（129.3 MB） | `9410d0b528c10a251ae947bd299d1939b0b3247df680c81c4164e94f5d87dc45` |
+
+> manifest 用 HF 镜像作为 `source`，Zenodo 仅作 `upstream` 备注（R6 的思路在此沿用：不走需确认令牌的网盘）。
+
+**② 缓存目录重定向（R1 定稿）**
+
+- VoiceFixer 把路径硬编码为 `os.path.expanduser("~") + "/.cache/voicefixer/..."`，**无参数可改**。
+- **实测：Windows 下 `expanduser("~")` 只认 `USERPROFILE`，设 `HOME` 完全无效**（POSIX 相反）。
+  因此 Worker 必须在 `import voicefixer` **之前**设置 `USERPROFILE`（同时设 `HOME` 以兼容 POSIX），
+  且**全进程生命周期内保持**——`Config.ckpt` 在**导入期**求值、`VoiceFixer.analysis_module_ckpt` 在**构造期**求值，
+  "导入后恢复环境变量"会失效。
+- 采用 home = `<repo>/models/cache/voicefixer-home`，权重实际落：
+
+```
+models/cache/voicefixer-home/.cache/voicefixer/analysis_module/checkpoints/vf.ckpt
+models/cache/voicefixer-home/.cache/voicefixer/synthesis_module/44100/model.ckpt-1490000_trimed.pt
+```
+
+  仍在 `models/cache/` 内（已被 .gitignore 忽略），`selfcheck` 只需断言两路径前缀为 `models/cache`。
+  副作用：matplotlib 会把 `.matplotlib` 缓存写进该 home，同样被忽略，可接受。
+
+**③ CPU 实测数据**（20 s / 44.1 kHz 单声道样本；60 s 用于观察跨块）
+
+| 项目 | 实测 |
+|---|---|
+| 模型加载（冷启动，含 466 MB ckpt 读取） | **81.4 s**（磁盘缓存后复测 **2.7–2.9 s**） |
+| 模型常驻内存 | **约 1.45 GB RSS**（基线） |
+| mode 0 · 20 s | **21.0 s → 0.95× 实时**，峰值 RSS 1.32 GB |
+| mode 1 · 20 s | **26.7–35.0 s → 0.57–0.75×**，峰值 RSS 1.33 GB |
+| mode 2 · 20 s | **25.6–26.6 s → 0.75–0.78×**，峰值 RSS 1.57 GB |
+| 整段 60 s（内部 30 s 分块） | **73.5 s → 0.82× 实时**，峰值 RSS **1.85 GB** |
+| 输出采样率 / 时长 | **44.1 kHz**；mode 0/2 **精确等于输入时长**；mode 1 少 336 样本（7.6 ms，`librosa.istft` 截断） |
+
+**④ 分块与取消（R4 / R5 结论，修正 §3.3 的分块假设）**
+
+- `restore_inmem()` **内部已按 30 s 分段**（`seg_length = 44100*30`），但**对外是黑盒、不可打断**。
+- 实测"外层自己切 10 s 块逐块调用"：耗时 **13.0 s**（比整段 20 s 的 21.0 s 更快，前向近似超线性），
+  峰值 RSS 1.65 GB，**总长度仍精确对齐**。
+- ⚠️ **但分块会改变修复结果**：与整段结果的相关性 前 10 s **0.909**、后 10 s **仅 0.197**
+  （mode 0，eval 模式、确定性推理）。即"同样的音频，切块与否听感/波形不同"，块边界还会引入电平跳变
+  （`restore_inmem` 内部按块做 `max>1.0` 的能量归一化）。
+- **阶段 1 设计决定**：为支持取消与内存可控，仍按外层分块（默认 **10 s**），但必须做
+  **块间重叠 + 交叉淡化**（overlap-add，重叠 0.3–0.5 s）来掩盖边界差异；进度按块上报，
+  取消在块边界生效。块长与重叠系数在阶段 1 实测微调，并在 UI 不暴露该内部参数。
+
+**⑤ 依赖精简（R11）**
+
+- `pip install voicefixer` 会额外拉入 `streamlit` / `pandas` / `scikit-learn`（约 200 MB），
+  仅服务于官方 demo。实测推理路径不导入这三者，**卸载后推理结果一致** → `requirements-voicefixer.txt`
+  给出"先装 torch(CPU) → `voicefixer --no-deps` → 补核心依赖"的精简安装顺序。
 
 ---
 
@@ -253,7 +316,7 @@ VoiceFixer 属于"音频品质提升"域，**直接加进既有的 `QualityView.
 
 | # | 现象（预期风险） | 根因 | 缓解 / 修复 |
 |---|---|---|---|
-| **R1** | 权重被下载到 `~/.cache/voicefixer/`，不在 `models/cache/` | VoiceFixer 硬编码缓存路径 | 阶段 0 优先验证可重定向方案（环境变量 / 设 `HOME` / 打补丁）；纳入 `selfcheck` 断言 |
+| **R1** | 权重被下载到 `~/.cache/voicefixer/`，不在 `models/cache/` | VoiceFixer 硬编码缓存路径 | ✅ 阶段 0 已定稿：设 **`USERPROFILE`**（Windows 只认它，`HOME` 无效）指向 `models/cache/voicefixer-home`，且需在 import 前设置并全程保持；纳入 `selfcheck` 断言（§4.1 ②） |
 | R2 | 输出被强制成 48 kHz | 复用 FlashSR 的采样率校验 | §3.5：采样率校验按后端区分，VoiceFixer 走 44.1 kHz |
 | R3 | 拿去修音乐效果差 / 用户误解 | VoiceFixer 面向**人声** | UI 文案标注"面向人声/语音"；音乐场景引导到 FlashSR/AudioSR |
 | R4 | 长音频内存/耗时不可控 | 整段 mel 修复 | 分块处理 + 块间进度/取消（阶段 1 实测块长与重叠） |

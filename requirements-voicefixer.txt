@@ -1,0 +1,62 @@
+# VoiceFixer 独立依赖（专用虚拟环境 `.venv-voicefixer`，Python 3.10）
+
+**必须与其它 venv 分环境安装。** 本清单实测解析出 `numpy==2.2.6`，与 `.venv`（AudioSR 侧 `numpy==1.23.5`）
+互不兼容；且 VoiceFixer 需要改写 `USERPROFILE` 才能把权重收进 `models/cache/`（见文末），独立进程更安全。
+
+安装步骤见 `docs/NuWave2-VoiceFixer音频修复集成实施计划.md` 阶段 0。
+
+```powershell
+python -m venv .venv-voicefixer
+.\.venv-voicefixer\Scripts\Activate.ps1
+python -m pip install -r requirements-voicefixer.txt
+```
+
+> 有 NVIDIA GPU 的机器：先按 PyTorch 官网装对应 CUDA 版本的 torch，再装其余依赖（本项目验证机无 GPU，走 CPU）。
+
+## 推理期真实依赖
+
+以下版本为 2026-09-09 在 Python 3.10 + CPU（无 GPU）环境实测通过的组合。
+
+```
+torch==2.14.0+cpu        # 来自 https://download.pytorch.org/whl/cpu（默认索引会拉 CUDA 版，多出约 2GB）
+numpy==2.2.6
+scipy==1.15.3
+librosa==0.11.0          # voicefixer.base 顶层 `import librosa.display`
+matplotlib==3.10.9       # 被 librosa.display 间接导入，缺失会 ImportError
+soundfile==0.14.0
+soxr==1.1.0
+torchlibrosa==0.1.0
+PyYAML==6.0.3
+voicefixer==0.1.3
+```
+
+## 不需要安装
+
+`pip install voicefixer` 会把 `streamlit` / `pandas` / `scikit-learn` 一并拉入（约 200MB），
+它们只服务于官方 `__main__.py` 的 Streamlit demo。实测推理路径（`from voicefixer import VoiceFixer`）
+**不导入**这三者，卸载后推理结果不变（已验证）。推荐安装顺序：
+
+```powershell
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install voicefixer==0.1.3 --no-deps
+python -m pip install numpy==2.2.6 scipy==1.15.3 librosa==0.11.0 matplotlib==3.10.9 ^
+    soundfile==0.14.0 soxr==1.1.0 torchlibrosa==0.1.0 PyYAML==6.0.3
+```
+
+## 权重与缓存目录（必须处理）
+
+VoiceFixer 把权重路径硬编码为 `~/.cache/voicefixer/...`（`voicefixer/base.py` 与 `voicefixer/vocoder/config.py`），
+无法通过参数或环境变量指定。已实测的重定向方案：
+
+- **Windows 下 `os.path.expanduser("~")` 只认 `USERPROFILE`，设 `HOME` 无效**（POSIX 下相反）。
+  故 Worker 必须在 `import voicefixer` **之前**设置，且**整个进程生命周期内保持**：
+
+```
+USERPROFILE = <repo>/models/cache/voicefixer-home
+HOME        = <repo>/models/cache/voicefixer-home   # POSIX / 其它库兼容
+```
+
+- `Config.ckpt`（声码器）在**模块导入期**求值，`VoiceFixer.analysis_module_ckpt`（分析模块）在**构造时**求值，
+  两者都读 `expanduser("~")`，所以不能"导入完就恢复环境变量"。
+- 权重实际落盘于 `models/cache/voicefixer-home/.cache/voicefixer/...`，仍在 `models/cache/` 内（已被 .gitignore 忽略）。
+- 副作用：matplotlib 等库会把 `.matplotlib` 缓存写进该 home，同样落在 `models/cache/` 下，可接受。
