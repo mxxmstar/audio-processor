@@ -9,6 +9,7 @@ use crate::recognizer::SongInfo;
 pub mod bili;
 /// 音频质量处理相关 Tauri 命令
 pub mod audio_quality;
+pub mod image_quality;
 /// aria2 下载器相关 Tauri 命令
 pub mod aria2;
 /// 端口占用查询相关 Tauri 命令

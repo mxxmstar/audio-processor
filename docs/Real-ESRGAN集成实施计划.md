@@ -1,6 +1,6 @@
 # 图像画质提升模块 · Real-ESRGAN 集成实施计划
 
-> 状态：实施中（**阶段 1 完成**：Python 模块 `python/image_ai_realesrgan/` 就绪——`pipeline.py` 自研 tile 调度（进度 + 协作式取消，解决 R6）、RGBA/灰度/16-bit 处理（R3）、png/jpg 输出（R5）；`fake_worker.py`/`selfcheck.py`/`test_worker.py` 齐备；14 项单测 + 真实权重自检通过，ready 握手与 fake 全链路验证通过。阶段 0 的环境与权重体积/SHA-256 实测数据已回填）
+> 状态：实施中（**阶段 2 完成**：Rust 侧 `src/image_quality/`（镜像 `audio_quality` 的 ai_worker/backend 协议层，result 载荷改为 width/height/scale/format）+ `src/commands/image_quality.rs`（`enhance_image` 系列命令与 `ImageQualityState`）+ `history.rs` 新增 `ImageEnhance`）+ `lib.rs`/`commands.rs` 注册；`cargo check` 通过，13 项 Rust 单测全过，含真实 Worker 前向 160×120→640×480。阶段 0/1 的环境、权重实测、Python 模块均已落地）
 > 编制日期：2026-09-09
 > 目标：新增**图像画质提升**模块，并率先接入 **Real-ESRGAN** 作为首个超分辨率后端，
 > 复用音频侧已跑通的「Python Worker + JSONL 协议 + manifest + 独立 venv」范式。

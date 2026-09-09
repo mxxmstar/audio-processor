@@ -15,6 +15,8 @@ pub enum HistoryKind {
     Download,
     /// 音频品质提升（AI 增强）
     Enhance,
+    /// 图像画质提升（Real-ESRGAN 超分）
+    ImageEnhance,
 }
 
 impl HistoryKind {
@@ -24,6 +26,7 @@ impl HistoryKind {
             HistoryKind::Recognize => "recognize",
             HistoryKind::Download => "download",
             HistoryKind::Enhance => "enhance",
+            HistoryKind::ImageEnhance => "image_enhance",
         }
     }
 
@@ -33,6 +36,7 @@ impl HistoryKind {
             HistoryKind::Recognize => "音频识别",
             HistoryKind::Download => "B站下载",
             HistoryKind::Enhance => "音质提升",
+            HistoryKind::ImageEnhance => "画质提升",
         }
     }
 
@@ -41,6 +45,7 @@ impl HistoryKind {
         match s {
             "download" => HistoryKind::Download,
             "enhance" => HistoryKind::Enhance,
+            "image_enhance" => HistoryKind::ImageEnhance,
             _ => HistoryKind::Recognize,
         }
     }

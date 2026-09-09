@@ -1,6 +1,7 @@
 // 子模块声明
 pub mod audio_rename; // 音频命名、冲突处理和本地文件移动
-pub mod audio_quality; // Python AI 音频增强与 Worker 协议
+pub mod audio_quality;
+pub mod image_quality; // Python AI 音频增强与 Worker 协议
 pub mod commands; // Tauri 命令（桥接层，仅负责前端调用与 fpcalc 资源路径解析）
 pub mod recognizer; // 音频识别独立模块（指纹/查询/错误集中于此，与 Tauri 解耦）
 pub mod http_client; // HTTP 客户端封装（用于向外部服务器如 B 站发送请求）
@@ -12,6 +13,7 @@ pub mod port_checker; // 端口占用查询模块
 
 use bili_state::BiliState;
 use commands::audio_quality::AudioQualityState;
+use commands::image_quality::ImageQualityState;
 use commands::aria2::Aria2ManagerState;
 use aria2::Aria2Manager;
 use std::sync::Arc;
@@ -25,6 +27,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(BiliState::new())
         .manage(AudioQualityState::default())
+        .manage(ImageQualityState::default())
         .manage(Arc::new(RwLock::new(Aria2Manager::new(6800, "aria2_secret_token_2026"))) as Aria2ManagerState)
         .setup(|app| {
             // 阶段 5：注入配置目录到 B 站存储 / WBI 缓存层
@@ -59,6 +62,12 @@ pub fn run() {
             commands::audio_quality::audio_quality_cancel,
             commands::audio_quality::audio_quality_list_models,
             commands::audio_quality::audio_quality_list_tasks,
+            commands::image_quality::enhance_image,
+            commands::image_quality::enhance_image_cancel,
+            commands::image_quality::enhance_image_check_ai_runtime,
+            commands::image_quality::enhance_image_download_model,
+            commands::image_quality::enhance_image_list_models,
+            commands::image_quality::enhance_image_list_tasks,
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,
