@@ -59,6 +59,8 @@ models/**/*.bin
 python/audio_ai_hifigan/models/**/*.pt
 python/audio_ai_hifigan/models/**/*.pth
 python/audio_ai_hifigan/models/**/*.bin
+# GFPGAN 运行时自动下载到包目录内的辅助权重（约 195MB，首次使用时拉取）
+python/image_ai_realesrgan/gfpgan/weights/
 models/*.ts
 models/*.zip
 models/*.tar.gz
@@ -92,3 +94,6 @@ bin/aria2/aria2.log
 
 # Vite 临时文件（配置热重载生成）
 vite.config.ts.timestamp-*.mjs
+
+# 临时测试产物
+test.png
