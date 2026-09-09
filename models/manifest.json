@@ -89,6 +89,32 @@
       ]
     },
     {
+      "id": "voicefixer",
+      "backend": "voicefixer",
+      "model_name": "VoiceFixer 语音综合修复（噪声/混响/低带宽/削波）",
+      "version": "0.1.3",
+      "file": "cache/voicefixer-home",
+      "sample_rate": 44100,
+      "files": [
+        {
+          "name": "analysis",
+          "file": "cache/voicefixer-home/.cache/voicefixer/analysis_module/checkpoints/vf.ckpt",
+          "size_bytes": 489307071,
+          "sha256": "748411b70089cadf34a6c11054f95f3a454e614af562c23b13a82f6cb413109f",
+          "source": "https://huggingface.co/Diogodiogod/voicefixer-models/resolve/main/vf.ckpt"
+        },
+        {
+          "name": "vocoder",
+          "file": "cache/voicefixer-home/.cache/voicefixer/synthesis_module/44100/model.ckpt-1490000_trimed.pt",
+          "size_bytes": 135613039,
+          "sha256": "9410d0b528c10a251ae947bd299d1939b0b3247df680c81c4164e94f5d87dc45",
+          "source": "https://huggingface.co/Diogodiogod/voicefixer-models/resolve/main/model.ckpt-1490000_trimed.pt"
+        }
+      ],
+      "upstream": "https://github.com/haoheliu/voicefixer",
+      "note": "面向人声/语音的综合修复（非音乐增强），输出固定 44.1 kHz，不得按 FlashSR 的 48 kHz 校验重采样（R2）。权重源为 HuggingFace 社区镜像 Diogodiogod/voicefixer-models：官方 Zenodo 直链（record 5600188 / 5469951）在构建环境返回 403，且上游两个子包会在 import 期自动 urlretrieve 下载。本项目改为「用户显式安装 + 路径重定向」：Worker 在导入前把 USERPROFILE/HOME 指到 file 字段（cache/voicefixer-home），权重即整体落在 models/cache/ 内（R1）。MIT 许可。"
+    },
+    {
       "id": "realesrgan-x4plus",
       "backend": "realesrgan",
       "name": "RealESRGAN_x4plus.pth",

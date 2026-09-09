@@ -689,6 +689,7 @@ async fn enhance_audio_task(
         chunk_seconds: config.chunk_seconds,
         overlap_seconds: config.overlap_seconds,
         output_sample_rate: Some(48_000),
+        mode: None,
     };
     let task_for_event = task.clone();
     let app_for_event = app.clone();

@@ -35,6 +35,8 @@ pub struct AiProcessRequest {
     pub chunk_seconds: f64,
     pub overlap_seconds: f64,
     pub output_sample_rate: Option<u32>,
+    /// VoiceFixer 的修复模式（0/1/2，见实施计划 §1.3）。其它后端忽略该字段。
+    pub mode: Option<u32>,
 }
 
 impl AiProcessRequest {
@@ -48,6 +50,7 @@ impl AiProcessRequest {
             chunk_seconds: 20.0,
             overlap_seconds: 2.0,
             output_sample_rate: Some(48_000),
+            mode: None,
         }
     }
 
@@ -63,6 +66,7 @@ impl AiProcessRequest {
             chunk_seconds: self.chunk_seconds,
             overlap_seconds: self.overlap_seconds,
             output_sample_rate: self.output_sample_rate,
+            mode: self.mode,
         }
     }
 }
@@ -79,6 +83,8 @@ struct ProcessMessage<'a> {
     chunk_seconds: f64,
     overlap_seconds: f64,
     output_sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -295,6 +301,44 @@ impl WorkerSpec {
             return None;
         }
         Some(Self::new(python).arg("-u").arg(script))
+    }
+
+    /// VoiceFixer 处理 Worker。它使用**独立的** `.venv-voicefixer` 运行时
+    /// （依赖组合与 FlashSR / AudioSR 均不兼容，见 `requirements-voicefixer.txt`）。
+    pub fn voicefixer() -> Option<Self> {
+        if let Some(path) = std::env::var_os("AUDIO_AI_VOICEFIXER_WORKER") {
+            return Some(Self::new(path));
+        }
+        let python = find_python_voicefixer()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai_voicefixer")
+            .join("worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(Self::new(python).arg("-u").arg(script))
+    }
+
+    /// VoiceFixer 协议自检用的 fake Worker（与 `hifigan_fake` 同构）。
+    pub fn voicefixer_fake(mode: &str) -> Option<Self> {
+        let python = find_python_voicefixer()?;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("python")
+            .join("audio_ai_voicefixer")
+            .join("fake_worker.py");
+        if !script.is_file() {
+            return None;
+        }
+        Some(
+            Self::new(python)
+                .arg("-u")
+                .arg(script)
+                .arg("--mode")
+                .arg(mode),
+        )
     }
 
     /// HiFi-GAN 协议自检用的 fake Worker（与 FlashSR 的 `flashsr_fake` 同构）。
@@ -885,6 +929,33 @@ fn find_python_flashsr() -> Option<PathBuf> {
     })
 }
 
+/// 查找 VoiceFixer 专用 Python 运行时（`.venv-voicefixer`）。
+///
+/// 优先级：`AUDIO_AI_VOICEFIXER_PYTHON` → `AUDIO_AI_PYTHON` →
+/// `.venv-voicefixer/Scripts/python.exe` → `.venv/...`（回退）→ `python` / `python3`。
+fn find_python_voicefixer() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("AUDIO_AI_VOICEFIXER_PYTHON") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("AUDIO_AI_PYTHON") {
+        candidates.push(PathBuf::from(path));
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    candidates.push(root.join(".venv-voicefixer").join("Scripts").join("python.exe"));
+    candidates.push(root.join(".venv").join("Scripts").join("python.exe"));
+    candidates.push(PathBuf::from("python"));
+    candidates.push(PathBuf::from("python3"));
+    candidates.into_iter().find(|candidate| {
+        std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,6 +1154,46 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event, WorkerEvent::Ready { models, .. } if models.contains(&"hifigan-48k".to_string()))));
+        assert!(run
+            .events
+            .iter()
+            .any(|event| matches!(event, WorkerEvent::Progress { .. })));
+        assert!(output.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- VoiceFixer 独立 Worker（`.venv-voicefixer` + `audio_ai_voicefixer/fake_worker.py`）----
+
+    #[tokio::test]
+    async fn voicefixer_fake_worker_ready_probe() {
+        let Some(spec) = WorkerSpec::voicefixer_fake("success") else {
+            eprintln!("skip: VoiceFixer python runtime unavailable");
+            return;
+        };
+        let ready = probe_worker(&spec).await.unwrap();
+        assert_eq!(ready.worker_version, "fake-voicefixer-0.1.0");
+        assert_eq!(ready.models, vec!["voicefixer"]);
+    }
+
+    #[tokio::test]
+    async fn voicefixer_fake_worker_success_round_trip() {
+        let Some(spec) = WorkerSpec::voicefixer_fake("success") else {
+            eprintln!("skip: VoiceFixer python runtime unavailable");
+            return;
+        };
+        let dir = temp_dir();
+        let output = dir.join("output.flac.part");
+        let mut request =
+            AiProcessRequest::new("test-voicefixer-success", Path::new("input.m4a"), &output);
+        request.model_id = "voicefixer".into();
+        request.mode = Some(0);
+        let run = run_worker(&spec, &request, None).await.unwrap();
+        // §3.5：假后端也必须回 44.1 kHz，否则掩盖 R2 类缺陷
+        assert_eq!(run.result.sample_rate, 44_100);
+        assert!(run
+            .events
+            .iter()
+            .any(|event| matches!(event, WorkerEvent::Ready { models, .. } if models.contains(&"voicefixer".to_string()))));
         assert!(run
             .events
             .iter()

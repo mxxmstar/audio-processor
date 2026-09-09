@@ -8,7 +8,8 @@ use crate::audio_quality::ai_worker::{
     PROTOCOL_VERSION,
 };
 use crate::audio_quality::backend::{
-    self, Backend, BackendDefaults, FLASHSR_SAMPLE_RATE, ModelInfo,
+    self, default_output_sample_rate, Backend, BackendDefaults, FLASHSR_SAMPLE_RATE, ModelInfo,
+    VOICEFIXER_SAMPLE_RATE,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -129,6 +130,9 @@ pub struct AudioQualityStartInput {
     pub overlap_seconds: Option<f64>,
     #[serde(default)]
     pub output_sample_rate: Option<u32>,
+    /// VoiceFixer 修复模式（0 原始 / 1 预处理去高频 / 2 训练模式）；其它后端忽略。
+    #[serde(default)]
+    pub mode: Option<u32>,
 }
 
 /// 检查 Python AI Worker 是否能启动并完成 JSONL ready 握手。
@@ -171,6 +175,7 @@ pub async fn audio_quality_check_ai_runtime(
         WorkerSpec::flashsr(),
         WorkerSpec::production(),
         WorkerSpec::hifigan(),
+        WorkerSpec::voicefixer(),
     ]
     .into_iter()
     .flatten()
@@ -292,8 +297,8 @@ pub fn audio_quality_start(
 
     let model_id = input.model_id.unwrap_or_else(|| "audiosr-basic".into());
     let backend = backend::resolve_backend(&model_id);
-    // FlashSR 仅支持 48 kHz 输出采样率（模型约束见实施计划 §4.4）。
-    validate_flashsr_sample_rate(backend, input.output_sample_rate)?;
+    // 采样率约束按后端区分：FlashSR 只能 48 kHz、VoiceFixer 原生 44.1 kHz（R2）。
+    validate_output_sample_rate(backend, input.output_sample_rate)?;
     let (spec, worker_kind) = backend::select_worker_spec(&model_id)?;
     let id = format!(
         "aq-{}-{}",
@@ -309,7 +314,11 @@ pub fn audio_quality_start(
         device: input.device.unwrap_or_else(|| "auto".into()),
         chunk_seconds: input.chunk_seconds.unwrap_or(defaults.chunk_seconds),
         overlap_seconds: input.overlap_seconds.unwrap_or(defaults.overlap_seconds),
-        output_sample_rate: input.output_sample_rate.or(Some(48_000)),
+        // 不能一律填 48 kHz：VoiceFixer 原生 44.1 kHz，填 48k 会被 Python 侧拒绝
+        output_sample_rate: input
+            .output_sample_rate
+            .or(Some(default_output_sample_rate(backend))),
+        mode: input.mode,
     };
     validate_request(&request)?;
 
@@ -429,16 +438,30 @@ pub fn audio_quality_list_tasks(
     Ok(state.list())
 }
 
-/// FlashSR 仅支持 48 kHz 输出采样率（模型硬约束，见实施计划 §4.4）。
-fn validate_flashsr_sample_rate(
+/// 输出采样率约束（按后端区分，避免张冠李戴）：
+/// - FlashSR 硬约束 48 kHz（模型约束见 FlashSR 实施计划 §4.4）；
+/// - VoiceFixer 原生 **44.1 kHz**，强制 48 kHz 会把修复结果重采样（R2）。
+fn validate_output_sample_rate(
     backend: Backend,
     output_sample_rate: Option<u32>,
 ) -> Result<(), String> {
-    if backend == Backend::FlashSr {
-        if let Some(rate) = output_sample_rate {
-            if rate != FLASHSR_SAMPLE_RATE {
-                return Err(format!("FlashSR 仅支持 {} Hz 输出采样率", FLASHSR_SAMPLE_RATE));
-            }
+    let expected = match backend {
+        Backend::FlashSr => Some(FLASHSR_SAMPLE_RATE),
+        Backend::VoiceFixer => Some(VOICEFIXER_SAMPLE_RATE),
+        _ => None,
+    };
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if let Some(rate) = output_sample_rate {
+        if rate != expected {
+            return Err(match backend {
+                Backend::FlashSr => format!("FlashSR 仅支持 {expected} Hz 输出采样率"),
+                Backend::VoiceFixer => {
+                    format!("语音修复（VoiceFixer）输出为 {expected} Hz，不支持其它采样率")
+                }
+                _ => format!("该后端仅支持 {expected} Hz 输出采样率"),
+            });
         }
     }
     Ok(())
@@ -627,22 +650,27 @@ mod tests {
             chunk_seconds: 2.0,
             overlap_seconds: 2.0,
             output_sample_rate: Some(48_000),
+            mode: None,
         };
         assert!(validate_request(&request).is_err());
     }
 
     #[test]
     fn flashsr_rejects_non_48k_output_sample_rate() {
-        assert!(validate_flashsr_sample_rate(
-            Backend::FlashSr,
-            Some(44_100)
-        )
-        .is_err());
-        assert!(validate_flashsr_sample_rate(Backend::FlashSr, Some(48_000)).is_ok());
+        assert!(validate_output_sample_rate(Backend::FlashSr, Some(44_100)).is_err());
+        assert!(validate_output_sample_rate(Backend::FlashSr, Some(48_000)).is_ok());
         // 未指定采样率时交给 Python 侧兜底为 48 kHz
-        assert!(validate_flashsr_sample_rate(Backend::FlashSr, None).is_ok());
+        assert!(validate_output_sample_rate(Backend::FlashSr, None).is_ok());
         // 其它后端不受该限制
-        assert!(validate_flashsr_sample_rate(Backend::AudioSr, Some(44_100)).is_ok());
+        assert!(validate_output_sample_rate(Backend::AudioSr, Some(44_100)).is_ok());
+    }
+
+    #[test]
+    fn voicefixer_rejects_48k_output_sample_rate() {
+        // R2：不得把 VoiceFixer 的 44.1 kHz 结果重采样成 48 kHz
+        assert!(validate_output_sample_rate(Backend::VoiceFixer, Some(48_000)).is_err());
+        assert!(validate_output_sample_rate(Backend::VoiceFixer, Some(44_100)).is_ok());
+        assert!(validate_output_sample_rate(Backend::VoiceFixer, None).is_ok());
     }
 
     #[test]
