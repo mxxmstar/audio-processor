@@ -14,6 +14,7 @@ pub const REALESRGAN_SCALE: u32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     RealEsrGan,
+    SwinIr,
     Unknown,
 }
 
@@ -21,6 +22,7 @@ impl Backend {
     pub fn as_str(self) -> &'static str {
         match self {
             Backend::RealEsrGan => "realesrgan",
+            Backend::SwinIr => "swinir",
             Backend::Unknown => "unknown",
         }
     }
@@ -29,9 +31,12 @@ impl Backend {
     pub fn parse(value: &str) -> Backend {
         match value {
             "realesrgan" => Backend::RealEsrGan,
+            "swinir" => Backend::SwinIr,
             other => {
                 if other.contains("realesrgan") {
                     Backend::RealEsrGan
+                } else if other.contains("swinir") {
+                    Backend::SwinIr
                 } else {
                     Backend::Unknown
                 }
@@ -45,6 +50,7 @@ impl Backend {
 pub struct ModelInfo {
     pub id: String,
     pub backend: String,
+    pub scale: u32,
 }
 
 /// 解析 `model_id` 对应的后端。优先从 manifest 读取 `backend` 字段；
@@ -79,10 +85,16 @@ pub fn list_models() -> Vec<ModelInfo> {
         Some(manifest) => manifest
             .models
             .into_iter()
-            .filter(|entry| Backend::parse(&entry.backend) == Backend::RealEsrGan)
+            .filter(|entry| {
+                matches!(
+                    Backend::parse(&entry.backend),
+                    Backend::RealEsrGan | Backend::SwinIr
+                )
+            })
             .map(|entry| ModelInfo {
                 id: entry.id,
                 backend: Backend::parse(&entry.backend).as_str().to_string(),
+                scale: entry.scale,
             })
             .collect(),
         None => Vec::new(),
@@ -108,6 +120,8 @@ struct Manifest {
 struct ManifestEntry {
     id: String,
     backend: String,
+    #[serde(default)]
+    scale: u32,
 }
 
 fn read_manifest() -> Option<Manifest> {

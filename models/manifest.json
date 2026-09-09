@@ -127,6 +127,54 @@
       "sha256": "49FAFD45F8FD7AA8D31AB2A22D14D91B536C34494A5CFE31EB5D89C2FA266ABB",
       "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
       "upstream": "https://github.com/xinntao/Real-ESRGAN"
+    },
+    {
+      "id": "swinir-classical-x2",
+      "backend": "swinir",
+      "model_name": "swinir_classical_x2",
+      "version": "v0.0",
+      "scale": 2,
+      "file": "cache/swinir/001_classicalSR_DIV2K_s48w8_SwinIR-M_x2.pth",
+      "size_bytes": 59019939,
+      "sha256": "ac6d4895f73aa1b3d563937e29dcedcfdff4d401280e248f23db3c6f68e8343b",
+      "source": "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/001_classicalSR_DIV2K_s48w8_SwinIR-M_x2.pth",
+      "upstream": "https://github.com/JingyunLiang/SwinIR"
+    },
+    {
+      "id": "swinir-classical-x3",
+      "backend": "swinir",
+      "model_name": "swinir_classical_x3",
+      "version": "v0.0",
+      "scale": 3,
+      "file": "cache/swinir/001_classicalSR_DIV2K_s48w8_SwinIR-M_x3.pth",
+      "size_bytes": 59758497,
+      "sha256": "d835497f2332aae839ae19a033290ced8686fa2a795f76fc5153ec2c83003f75",
+      "source": "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/001_classicalSR_DIV2K_s48w8_SwinIR-M_x3.pth",
+      "upstream": "https://github.com/JingyunLiang/SwinIR"
+    },
+    {
+      "id": "swinir-classical-x4",
+      "backend": "swinir",
+      "model_name": "swinir_classical_x4",
+      "version": "v0.0",
+      "scale": 4,
+      "file": "cache/swinir/001_classicalSR_DIV2K_s48w8_SwinIR-M_x4.pth",
+      "size_bytes": 59611499,
+      "sha256": "129dc773ba2d4c07f3eb0bb116fbe692011b7cc072d9ca12797cd3748198610a",
+      "source": "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/001_classicalSR_DIV2K_s48w8_SwinIR-M_x4.pth",
+      "upstream": "https://github.com/JingyunLiang/SwinIR"
+    },
+    {
+      "id": "swinir-real-x4",
+      "backend": "swinir",
+      "model_name": "swinir_real_x4",
+      "version": "v0.0",
+      "scale": 4,
+      "file": "cache/swinir/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_PSNR.pth",
+      "size_bytes": 67129849,
+      "sha256": "1fd8fed99684bd271db55563e4906d36459cf535446820053f7a1081d4781dc5",
+      "source": "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_PSNR.pth",
+      "upstream": "https://github.com/JingyunLiang/SwinIR"
     }
   ]
 }

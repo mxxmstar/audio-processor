@@ -294,14 +294,186 @@ class RealESRGANRunner:
         return out
 
 
+class SwinIRRunner(RealESRGANRunner):
+    """SwinIR 后端：复用 `RealESRGANRunner` 的 tile 分块、预处理与写回框架，
+    仅替换网络构造与权重加载。
+
+    SwinIR 与 Real-ESRGAN 的差异：
+    - 网络为窗口多头自注意力（SwinIR），要求**输入空间尺寸是 `window_size`(8)
+      的倍数**，因此 `pre_process` 改为按 8 对齐做 reflect pad（而非 2/4 的
+      mod_scale）。
+    - 权重以 `{'params': state_dict}` 或 `{'params_ema': state_dict}` 包裹
+      （官方保存格式），需解包；DataParallel 保存时键含 `module.` 前缀，需剥离。
+    - 每个权重固定一个上采样倍数（`upscale`），由 `model_name` 查表决定
+      `upsampler`（pixelshuffle 用于 classicalSR，nearest+conv 用于真实世界）。
+    """
+
+    # model_name -> (上采样倍数, upsampler 类型, 训练 img_size)
+    # classicalSR 训练用 img_size=48（文件名 s48w8），realSR 用 img_size=64（s64w8）。
+    # 该值仅决定构建期 attn_mask buffer 形状以匹配权重；推理时 forward 按输入
+    # 动态重算 attention mask，因此任意尺寸均可处理。
+    _PARAMS: dict[str, tuple[int, str, int]] = {
+        "swinir_classical_x2": (2, "pixelshuffle", 48),
+        "swinir_classical_x3": (3, "pixelshuffle", 48),
+        "swinir_classical_x4": (4, "pixelshuffle", 48),
+        "swinir_real_x4": (4, "nearest+conv", 64),
+    }
+    _WINDOW = 8
+
+    def __init__(self, model_path: str, model_name: str, scale: int, device: torch.device) -> None:
+        from basicsr.archs.swinir_arch import SwinIR
+
+        if model_name not in self._PARAMS:
+            raise WorkerFailure("MODEL_MANIFEST_INVALID", f"unknown SwinIR model: {model_name}")
+        upscale, upsampler, img_size = self._PARAMS[model_name]
+        model = SwinIR(
+            upscale=upscale,
+            in_chans=3,
+            img_size=img_size,
+            window_size=self._WINDOW,
+            img_range=1.0,
+            depths=[6, 6, 6, 6, 6, 6],
+            embed_dim=180,
+            num_heads=[6, 6, 6, 6, 6, 6],
+            mlp_ratio=2,
+            upsampler=upsampler,
+            resi_connection="1conv",
+        )
+        loadnet = torch.load(model_path, map_location="cpu")
+        if "params_ema" in loadnet:
+            state_dict = loadnet["params_ema"]
+        elif "params" in loadnet:
+            state_dict = loadnet["params"]
+        else:
+            state_dict = loadnet
+        # DataParallel 保存时键含 `module.` 前缀，需剥离；单卡保存则原样保留。
+        state_dict = {
+            k[len("module.") :] if k.startswith("module.") else k: v
+            for k, v in state_dict.items()
+        }
+        model.load_state_dict(state_dict, strict=True)
+        model.eval()
+        self.model = model.to(device)
+        self.scale = scale
+        self.device = device
+        self.img: Any = None
+        self.mod_pad_h = 0
+        self.mod_pad_w = 0
+
+    def pre_process(self, rgb_hwc: np.ndarray) -> None:
+        """与 `RealESRGANRunner.pre_process` 同，但按 SwinIR 习惯归一化到 [0,1]
+        并对齐到 `window_size`(8)。
+
+        SwinIR 在 [0,1] 空间训练（img_range=1），因此输入需除以 255；Real-ESRGAN
+        直接用 0-255，两者在 `pre_process` 上分叉。
+        """
+        import torch.nn.functional as F
+
+        img = torch.from_numpy(np.ascontiguousarray(np.transpose(rgb_hwc, (2, 0, 1)))).float() / 255.0
+        self.img = img.unsqueeze(0).to(self.device)
+        self.mod_pad_h = 0
+        self.mod_pad_w = 0
+        _, _, h, w = self.img.shape
+        ws = self._WINDOW
+        if h % ws != 0:
+            self.mod_pad_h = ws - h % ws
+        if w % ws != 0:
+            self.mod_pad_w = ws - w % ws
+        if self.mod_pad_h or self.mod_pad_w:
+            self.img = F.pad(self.img, (0, self.mod_pad_w, 0, self.mod_pad_h), "reflect")
+
+
+    def tile_upscale(self, tile_size: int, cancel_event: threading.Event, request_id: str) -> np.ndarray:
+        """SwinIR 专用分块：每块输入先 pad 到 `window_size`(8) 倍数以满足窗口注意力
+        约束，输出再裁掉该 pad；重叠（TILE_PAD）、进度与取消逻辑与基类一致。"""
+        import torch.nn.functional as F
+
+        batch, channel, height, width = self.img.shape
+        output_height = height * self.scale
+        output_width = width * self.scale
+        out_np = np.zeros((output_height, output_width, channel), dtype=np.uint8)
+        tiles_x = int(np.ceil(width / tile_size))
+        tiles_y = int(np.ceil(height / tile_size))
+        total = tiles_x * tiles_y
+        done = 0
+        for y in range(tiles_y):
+            for x in range(tiles_x):
+                if cancel_event.is_set():
+                    raise WorkerFailure("CANCELLED", "处理已取消")
+                ofs_x = x * tile_size
+                ofs_y = y * tile_size
+                in_sx = ofs_x
+                in_ex = min(ofs_x + tile_size, width)
+                in_sy = ofs_y
+                in_ey = min(ofs_y + tile_size, height)
+                in_sx_pad = max(in_sx - TILE_PAD, 0)
+                in_ex_pad = min(in_ex + TILE_PAD, width)
+                in_sy_pad = max(in_sy - TILE_PAD, 0)
+                in_ey_pad = min(in_ey + TILE_PAD, height)
+                tile_h = in_ey - in_sy
+                tile_w = in_ex - in_sx
+                input_tile = self.img[:, :, in_sy_pad:in_ey_pad, in_sx_pad:in_ex_pad]
+                # 补齐到 window_size 倍数（SwinIR 窗口注意力要求输入为 8 的倍数）
+                _, _, th_, tw_ = input_tile.shape
+                ph = (self._WINDOW - th_ % self._WINDOW) % self._WINDOW
+                pw = (self._WINDOW - tw_ % self._WINDOW) % self._WINDOW
+                if ph or pw:
+                    input_tile = F.pad(input_tile, (0, pw, 0, ph))
+                with torch.no_grad():
+                    output_tile = self.model(input_tile)
+                ot = self._tensor_to_uint8_bgr(output_tile)
+                # 裁掉 window pad（输出侧）
+                if ph or pw:
+                    ot = ot[: (th_ + ph) * self.scale, : (tw_ + pw) * self.scale]
+                osy_tile = (in_sy - in_sy_pad) * self.scale
+                oey_tile = osy_tile + tile_h * self.scale
+                osx_tile = (in_sx - in_sx_pad) * self.scale
+                oex_tile = osx_tile + tile_w * self.scale
+                dy0 = in_sy * self.scale
+                dy1 = in_ey * self.scale
+                dx0 = in_sx * self.scale
+                dx1 = in_ex * self.scale
+                out_np[dy0:dy1, dx0:dx1] = ot[osy_tile:oey_tile, osx_tile:oex_tile]
+                done += 1
+                emit_progress(
+                    request_id,
+                    "inference",
+                    PERCENT_INFERENCE_START + PERCENT_INFERENCE_SPAN * done / total,
+                    processed_tiles=done,
+                    total_tiles=total,
+                )
+        return self._crop_mod_pad(out_np)
+
 def get_runner(spec: "worker.ModelSpec", device: torch.device) -> RealESRGANRunner:
-    """按 (权重路径, 模型名, 倍数, 设备) 缓存已加载的模型，避免重复加载。"""
+    """按 (权重路径, 模型名, 倍数, 设备) 缓存已加载的模型，避免重复加载。
+
+    按 `spec.backend` 选择后端：realesrgan 走 `RealESRGANRunner`，swinir 走
+    `SwinIRRunner`；两者接口一致（`upscale` 同签名），`enhance` 无需区分。
+    """
+    if spec.backend == "swinir":
+        return _get_swinir_runner(spec, device)
     weight_path = str(spec.artifacts[0][1])
     key = (weight_path, spec.model_name, int(spec.scale), str(device))
     with _RUNNER_LOCK:
         runner = _RUNNER_CACHE.get(key)
         if runner is None:
             runner = RealESRGANRunner(
+                model_path=weight_path,
+                model_name=spec.model_name,
+                scale=int(spec.scale),
+                device=device,
+            )
+            _RUNNER_CACHE[key] = runner
+        return runner
+
+
+def _get_swinir_runner(spec: "worker.ModelSpec", device: torch.device) -> SwinIRRunner:
+    weight_path = str(spec.artifacts[0][1])
+    key = (weight_path, spec.model_name, int(spec.scale), str(device))
+    with _RUNNER_LOCK:
+        runner = _RUNNER_CACHE.get(key)
+        if runner is None:
+            runner = SwinIRRunner(
                 model_path=weight_path,
                 model_name=spec.model_name,
                 scale=int(spec.scale),

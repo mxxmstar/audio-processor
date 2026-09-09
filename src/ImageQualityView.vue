@@ -46,6 +46,7 @@ interface ImageQualityTask {
 interface ModelInfo {
   id: string;
   backend: string;
+  scale?: number;
 }
 
 const inputPath = ref("");
@@ -69,17 +70,28 @@ const running = computed(() =>
 
 const availableModelIds = computed(() => new Set(runtime.value?.models ?? []));
 
-// Real-ESRGAN 当前只有 x4plus 一个后端，模型清单由后端 list_models 驱动。
+// 模型清单由后端 list_models 驱动（Real-ESRGAN + SwinIR 等超分后端）。
+const modelTitle: Record<string, string> = {
+  "realesrgan-x4plus": "Real-ESRGAN 通用 4× 超分（最常用）",
+  "realesrgan-x2plus": "Real-ESRGAN 通用 2× 超分",
+  "realesrgan-x4plus-anime": "Real-ESRGAN 动漫 4× 超分",
+  "swinir-classical-x2": "SwinIR 经典 2× 超分（DIV2K 训练）",
+  "swinir-classical-x3": "SwinIR 经典 3× 超分（唯一原生 3×）",
+  "swinir-classical-x4": "SwinIR 经典 4× 超分（DIV2K 训练）",
+  "swinir-real-x4": "SwinIR 真实世界 4× 超分（BSRGAN 退化）",
+};
 const modelOptions = computed(() => {
   const list = models.value.length
     ? models.value
-    : [{ id: modelId.value, backend: "realesrgan" }];
+    : [{ id: modelId.value, backend: "realesrgan", scale: 4 }];
   return list.map((m) => {
     const available = availableModelIds.value.has(m.id);
+    const backendName = m.backend === "swinir" ? "SwinIR" : "Real-ESRGAN";
+    const scaleText = m.scale ? `${m.scale}×` : "";
     return {
       label: `${m.id}${available ? " · 可用" : " · 不可用"}`,
       value: m.id,
-      title: "Real-ESRGAN 通用 4× 超分",
+      title: modelTitle[m.id] ?? `${backendName} ${scaleText} 超分`,
     };
   });
 });
@@ -98,6 +110,7 @@ const formatOptions = [
 const scaleOptions = [
   { label: "模型默认", value: "" },
   { label: "2×", value: "2" },
+  { label: "3×", value: "3" },
   { label: "4×", value: "4" },
   { label: "8×", value: "8" },
 ];
@@ -299,7 +312,7 @@ onUnmounted(() => {
 
 <template>
   <div class="panel">
-    <a-card title="图像画质提升（Real-ESRGAN 超分）" :bordered="false" class="main-card">
+    <a-card title="图像画质提升（AI 超分）" :bordered="false" class="main-card">
       <template #extra>
         <a-space>
           <a-button size="small" :loading="checking" @click="checkRuntime">
@@ -415,7 +428,7 @@ onUnmounted(() => {
             :options="scaleOptions"
             style="min-width: 160px"
           />
-          <span class="dim" style="margin-left: 0.5rem">默认按模型倍数（4×），可选 2× / 4× / 8×</span>
+          <span class="dim" style="margin-left: 0.5rem">默认按模型倍数（Real-ESRGAN 4× / SwinIR 按模型原生倍数），可选 2× / 3× / 4× / 8×</span>
         </a-form-item>
 
         <a-form-item v-if="format === 'jpg'" label="JPG 质量">
@@ -442,7 +455,7 @@ onUnmounted(() => {
           </a-button>
         </a-space>
         <div class="hint">
-          输出文件自动生成在源文件旁（默认 .png / 选 JPG 时 .jpg，带尺寸去重），不覆盖原图；放大倍数默认按模型（4×），可在上方切换 2× / 4× / 8×。
+          输出文件自动生成在源文件旁（默认 .png / 选 JPG 时 .jpg，带尺寸去重），不覆盖原图；放大倍数默认按模型（Real-ESRGAN 4× / SwinIR 按模型原生倍数），可在上方切换 2× / 3× / 4× / 8×。
         </div>
       </a-form>
 

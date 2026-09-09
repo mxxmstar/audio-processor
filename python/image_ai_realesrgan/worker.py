@@ -29,8 +29,10 @@ from typing import Any, NamedTuple
 WORKER_VERSION = "python-realesrgan-0.1.0"
 MODULE_ROOT = Path(__file__).resolve().parent
 
-#: Real-ESRGAN 后端在 manifest 中的 backend 标识与默认模型 id。
-SUPPORTED_BACKENDS = frozenset({"realesrgan"})
+#: 图像超分后端在 manifest 中的 backend 标识与默认模型 id。
+#: realesrgan 与 swinir 共用同一份 Python Worker（`image_ai_realesrgan`），
+#: 由 `pipeline` 按 `spec.backend` 在具体模型内部分发到不同网络。
+SUPPORTED_BACKENDS = frozenset({"realesrgan", "swinir"})
 REALESRGAN_MODEL_ID = "realesrgan-x4plus"
 
 # Rust 以 `python <绝对路径>/worker.py` 启动本模块，此时没有包上下文，相对

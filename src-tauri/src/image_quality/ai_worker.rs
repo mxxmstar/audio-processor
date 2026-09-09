@@ -252,7 +252,7 @@ impl WorkerSpec {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("python")
-            .join("audio_ai_flashsr")
+            .join("audio_ai")
             .join("model_manager.py");
         if !script.is_file() {
             return None;
