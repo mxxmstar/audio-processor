@@ -9,9 +9,11 @@ dist/
 # Python 虚拟环境（依赖体积大，不入库）
 # .venv  : 音频识别 + AudioSR（requirements.txt / requirements-ai.txt）
 # .venv-flashsr : FlashSR 专用（requirements-flashsr.txt）
-#                 两者 numpy 版本冲突（1.23.5 vs 2.2.6），必须分环境
+# .venv-realesrgan : Real-ESRGAN 专用（requirements-realesrgan.txt）
+#                 三者 numpy / torch 版本链互不兼容，必须分环境
 .venv/
 .venv-flashsr/
+.venv-realesrgan/
 # Python 字节码
 __pycache__/
 *.pyc
