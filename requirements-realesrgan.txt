@@ -1,0 +1,42 @@
+# Real-ESRGAN 独立依赖（专用虚拟环境 `.venv-realesrgan`，Python 3.10，CPU）
+#
+# ⚠️ 必须与音频侧 venv（`.venv` / `.venv-flashsr`）物理隔离：本清单锁定
+# 的 torch/torchvision/numpy 版本链与音频侧不兼容（见 `docs/Real-ESRGAN集成实施计划.md` R1/R8）。
+#
+# 安装步骤（CPU 环境，本机无 NVIDIA GPU）：
+#
+# ```powershell
+# cd <仓库根目录>
+# python -m venv .venv-realesrgan
+# .\.venv-realesrgan\Scripts\Activate.ps1
+# python -m pip install --upgrade pip
+# # torch/torchvision 必须从 PyTorch CPU 索引装，否则 PyPI 默认拉到 CUDA 巨无霸构建
+# python -m pip install torch==2.1.0+cpu torchvision==0.16.0+cpu --index-url https://download.pytorch.org/whl/cpu
+# python -m pip install -r requirements-realesrgan.txt
+# ```
+#
+# 有 CUDA 的机器：把上面 torch/torchvision 那行换成对应 cuXXX 索引即可，其余不变。
+#
+# ---------------------------------------------------------------------------
+# 版本锁定（2026-09-09 实测通过的组合，解决 R1 版本冲突）：
+#
+#   torch / torchvision 必须锁到 basicsr 1.4.2 兼容的 2.1 / 0.16 线：
+#     basicsr 的 `data/degradations.py` 仍 `from torchvision.transforms.functional_tensor
+#     import rgb_to_grayscale`，该子模块在 torchvision>=0.17 已被移除；0.16.0+cpu 仅
+#     打印弃用警告、可正常导入与推理。更高 torch（如 2.14）配 torchvision 0.29 会直接
+#     ModuleNotFoundError 而无法 import basicsr。
+#
+#   numpy 必须 < 2：basicsr 1.4.2 内含已移除的 numpy 旧 API（np.int 等）。
+#
+#   opencv 用 headless 版：推理只用 cv2.imread/imwrite，不需要 GUI 后端；
+#   且 headless 4.9.x 兼容 numpy 1.24（opencv-python 5.x 要求 numpy>=2，会与 basicsr 冲突）。
+#
+#   basicsr 1.4.2 安装时会从 sdist 编译 `data_util.pyx`，需要 Cython + C 编译器
+#   （本机已具备 MSVC 构建工具；干净环境请先 `python -m pip install cython`）。
+# ---------------------------------------------------------------------------
+
+numpy==1.24.4
+opencv-python-headless==4.9.0.80
+Pillow==12.3.0
+basicsr==1.4.2
+realesrgan==0.3.0

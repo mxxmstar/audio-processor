@@ -1,6 +1,6 @@
 # 图像画质提升模块 · Real-ESRGAN 集成实施计划
 
-> 状态：规划中（待评审）
+> 状态：实施中（**阶段 0 完成**：独立 `.venv-realesrgan` 已建、依赖锁定、`requirements-realesrgan.txt` 已落地；官方 `RealESRGANer` 推理路径跑通小图 4× 与大图内部分块，权重体积/SHA-256/直连下载均已实测回填）
 > 编制日期：2026-09-09
 > 目标：新增**图像画质提升**模块，并率先接入 **Real-ESRGAN** 作为首个超分辨率后端，
 > 复用音频侧已跑通的「Python Worker + JSONL 协议 + manifest + 独立 venv」范式。
@@ -36,7 +36,7 @@ Real-ESRGAN（Wang et al., 2021，*Real-ESRGAN: Training Real-World Blind Super-
 
 | 常见官方权重 | 说明 | 体积（阶段 0 实测回填） |
 |---|---|---|
-| `RealESRGAN_x4plus` | 通用 4×，**首发推荐** | 约 64 MB |
+| `RealESRGAN_x4plus` | 通用 4×，**首发推荐** | 约 64 MB（**实测 67,040,989 B / 63.9 MB**，见 §3.4） |
 | `RealESRGAN_x4plus_anime_6B` | 动漫插画 4×（更轻） | 约 17 MB |
 | `realesr-animevideov3` | 动漫/视频 4×（SRVGGNet） | 较小 |
 | `RealESRGAN_x2plus` | 通用 2× | 中等 |
@@ -178,7 +178,8 @@ src/ImageQualityView.vue                  # 新视图
   "model_name": "RealESRGAN_x4plus",
   "version": "v0.1.0",
   "file": "cache/realesrgan/RealESRGAN_x4plus.pth",
-  "sha256": "<下载后回填>",
+  "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+  "size_bytes": 67040989,
   "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
   "upstream": "https://github.com/xinntao/Real-ESRGAN"
 }
