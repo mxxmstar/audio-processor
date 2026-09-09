@@ -51,6 +51,8 @@ const inputPath = ref("");
 const modelId = ref("flashsr");
 const device = ref("auto");
 const sampleRate = ref(48000);
+/** VoiceFixer 修复模式：0 原始（默认）/ 1 去高频预处理 / 2 训练模式 */
+const vfMode = ref(0);
 
 const tasks = ref<QualityTask[]>([]);
 const models = ref<ModelInfo[]>([]);
@@ -72,6 +74,7 @@ function backendOf(id: string): string {
   if (found) return found.backend;
   if (id.startsWith("flashsr")) return "flashsr";
   if (id.startsWith("audiosr")) return "audiosr";
+  if (id.startsWith("voicefixer")) return "voicefixer";
   return "";
 }
 
@@ -85,14 +88,18 @@ const modelOptions = computed(() => {
         ? "FlashSR"
         : m.backend === "audiosr"
           ? "AudioSR"
-          : m.backend;
+          : m.backend === "voicefixer"
+            ? "语音修复（VoiceFixer）"
+            : m.backend;
     const available = availableModelIds.value.has(m.id);
     const desc =
       m.backend === "flashsr"
         ? "标准（快）"
         : m.backend === "audiosr"
           ? "高保真（慢）"
-          : "";
+          : m.backend === "voicefixer"
+            ? "噪声 / 混响 / 低带宽 / 削波，面向人声"
+            : "";
     return {
       label: `${backendLabel} · ${m.id}${available ? " · 可用" : " · 不可用"}`,
       value: m.id,
@@ -101,12 +108,22 @@ const modelOptions = computed(() => {
   });
 });
 
+const isVoiceFixer = computed(() => backendOf(modelId.value) === "voicefixer");
+
 const modelHint = computed(() => {
   const backend = backendOf(modelId.value);
   if (backend === "flashsr") return "FlashSR = 标准（快）";
   if (backend === "audiosr") return "AudioSR = 高保真（慢）";
+  if (backend === "voicefixer")
+    return "面向人声/语音（播客、录音、视频人声、电话录音）；音乐请用 FlashSR / AudioSR";
   return "";
 });
+
+const modeOptions = [
+  { label: "0 · 原始（推荐）", value: 0 },
+  { label: "1 · 预处理去高频", value: 1 },
+  { label: "2 · 训练模式（严重退化）", value: 2 },
+];
 
 const deviceOptions = [
   { label: "自动", value: "auto" },
@@ -114,24 +131,26 @@ const deviceOptions = [
   { label: "CUDA", value: "cuda" },
 ];
 
-// FlashSR 与 AudioSR 均只输出 48 kHz，锁定采样率并提示。
-const isFixed48k = computed(() => {
+// FlashSR / AudioSR 固定 48 kHz；VoiceFixer 原生 **44.1 kHz**（实施计划 §3.5），
+// 不能套用 48 kHz 校验，否则会把修复结果重采样。
+const fixedSampleRate = computed(() => {
+  if (isVoiceFixer.value) return 44100;
   const backend = backendOf(modelId.value);
-  return backend === "flashsr" || backend === "audiosr";
+  return backend === "flashsr" || backend === "audiosr" ? 48000 : null;
 });
 
 const sampleRateOptions = computed(() =>
-  isFixed48k.value
-    ? [{ label: "48000 Hz（模型固定）", value: 48000 }]
+  fixedSampleRate.value
+    ? [{ label: `${fixedSampleRate.value} Hz（模型固定）`, value: fixedSampleRate.value }]
     : [
         { label: "48000 Hz", value: 48000 },
         { label: "44100 Hz", value: 44100 },
       ]
 );
 
-// FlashSR / AudioSR 固定输出 48 kHz，切换模型时锁定采样率。
-watch(isFixed48k, (locked) => {
-  if (locked) sampleRate.value = 48000;
+// 切换模型时把采样率锁定到该后端的原生速率。
+watch(fixedSampleRate, (rate) => {
+  if (rate) sampleRate.value = rate;
 });
 
 function statusColor(s: string): string {
@@ -242,6 +261,8 @@ async function start() {
         modelId: modelId.value,
         device: device.value,
         outputSampleRate: sampleRate.value,
+        // 仅 VoiceFixer 使用；其它后端下发 undefined 即不传该字段
+        mode: isVoiceFixer.value ? vfMode.value : undefined,
       },
     });
     activeTask.value = task;
@@ -394,7 +415,7 @@ onUnmounted(() => {
         </a-form-item>
 
         <a-row :gutter="12">
-          <a-col :span="8">
+          <a-col :span="6">
             <a-form-item label="模型">
               <a-space direction="vertical" :size="4">
                 <a-space>
@@ -414,12 +435,16 @@ onUnmounted(() => {
                   </a-button>
                 </a-space>
                 <span v-if="modelHint" style="color: rgba(0, 0, 0, 0.45); font-size: 12px">
-                  {{ modelHint }}（FlashSR 仅支持 48000 Hz 输出）
+                  {{ modelHint }}
+                  <template v-if="fixedSampleRate">
+                    （该后端输出固定 {{ fixedSampleRate }} Hz）
+                  </template>
+                  <template v-else>（FlashSR 仅支持 48000 Hz 输出）</template>
                 </span>
               </a-space>
             </a-form-item>
           </a-col>
-          <a-col :span="8">
+          <a-col :span="6">
             <a-form-item label="计算设备">
               <a-select
                 v-model:value="device"
@@ -428,13 +453,23 @@ onUnmounted(() => {
               />
             </a-form-item>
           </a-col>
-          <a-col :span="8">
+          <a-col :span="6">
             <a-form-item label="输出采样率">
               <a-select
                 v-model:value="sampleRate"
                 :options="sampleRateOptions"
-                :disabled="isFixed48k"
+                :disabled="!!fixedSampleRate"
                 style="min-width: 120px"
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :span="6">
+            <a-form-item label="修复模式（仅 VoiceFixer）">
+              <a-select
+                v-model:value="vfMode"
+                :options="modeOptions"
+                :disabled="!isVoiceFixer"
+                style="min-width: 160px"
               />
             </a-form-item>
           </a-col>
