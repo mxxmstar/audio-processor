@@ -52,6 +52,7 @@ const inputPath = ref("");
 const modelId = ref("realesrgan-x4plus");
 const device = ref("cpu");
 const format = ref<"png" | "jpg">("png");
+const outscale = ref<string>("");
 const jpgQuality = ref(95);
 
 const tasks = ref<ImageQualityTask[]>([]);
@@ -92,6 +93,13 @@ const deviceOptions = [
 const formatOptions = [
   { label: "PNG（无损）", value: "png" },
   { label: "JPG（有损，可调质量）", value: "jpg" },
+];
+
+const scaleOptions = [
+  { label: "模型默认", value: "" },
+  { label: "2×", value: "2" },
+  { label: "4×", value: "4" },
+  { label: "8×", value: "8" },
 ];
 
 function statusColor(s: string): string {
@@ -206,6 +214,9 @@ async function start() {
     };
     if (format.value === "jpg") {
       payload.jpgQuality = jpgQuality.value;
+    }
+    if (outscale.value) {
+      payload.outscale = Number(outscale.value);
     }
     const task = await invoke<ImageQualityTask>("enhance_image", { input: payload });
     activeTask.value = task;
@@ -398,6 +409,15 @@ onUnmounted(() => {
           </a-col>
         </a-row>
 
+        <a-form-item label="放大倍数">
+          <a-select
+            v-model:value="outscale"
+            :options="scaleOptions"
+            style="min-width: 160px"
+          />
+          <span class="dim" style="margin-left: 0.5rem">默认按模型倍数（4×），可选 2× / 4× / 8×</span>
+        </a-form-item>
+
         <a-form-item v-if="format === 'jpg'" label="JPG 质量">
           <a-slider v-model:value="jpgQuality" :min="40" :max="100" :step="1" style="max-width: 320px" />
           <span class="dim" style="margin-left: 0.5rem">{{ jpgQuality }}</span>
@@ -422,7 +442,7 @@ onUnmounted(() => {
           </a-button>
         </a-space>
         <div class="hint">
-          输出文件自动生成在源文件旁（默认 .png / 选 JPG 时 .jpg，带尺寸去重），不覆盖原图；当前模型固定 4× 放大。
+          输出文件自动生成在源文件旁（默认 .png / 选 JPG 时 .jpg，带尺寸去重），不覆盖原图；放大倍数默认按模型（4×），可在上方切换 2× / 4× / 8×。
         </div>
       </a-form>
 
