@@ -1,6 +1,7 @@
 # 音频修复增强 · NuWave2 & VoiceFixer 集成实施计划
 
-> 状态：**阶段 0 已完成**（2026-09-09，环境/权重/缓存/性能均已实测，见 §4.1）；阶段 1 待实施
+> 状态：**阶段 0–4 已完成**（2026-09-09，VoiceFixer 后端已全链路打通：Python Worker / Rust 路由 /
+> manifest 登记 / 前端入口 / 真实权重验证）；**阶段 5（NuWave2 评估）待启动**
 > 编制日期：2026-09-09
 > 目标：评估并为 **NuWave2**（通用音频上采样）与 **VoiceFixer**（语音综合修复）两个后端
 > 制定接入方案，补齐现有"只能升采样 / 只能降噪"的能力缺口。
@@ -241,10 +242,10 @@ VoiceFixer 属于"音频品质提升"域，**直接加进既有的 `QualityView.
 | 阶段 | 内容 | 交付 |
 |---|---|---|
 | **0 · 可行性验证** ✅ **已完成 2026-09-09** | 建 `.venv-voicefixer`（或验证能否复用现有 venv）；`pip install voicefixer`；**验证缓存目录可重定向到 `models/cache/`**；CPU 跑通一次 mode 0；实测耗时/内存 | 环境 OK + 实测数据回填 + 缓存方案定稿（见 §4.1） |
-| **1 · Python 模块** | 照 §3.2 建 `python/audio_ai_voicefixer/`；`pipeline.py` 实现 mode 分派 + 分块进度/取消；fake / selfcheck / test 齐备 | 可 `ready` 握手、fake 可跑 |
-| **2 · Rust 侧** | `backend.rs` 新增 `VoiceFixer` 枚举与路由；`ai_worker.rs` 新增 `WorkerSpec::voicefixer()` + `find_python_voicefixer()`；`manifest.json` 条目 | 运行时检查可见、可安装 |
-| **3 · 前端** | §3.6 下拉档位 + mode 选择 + 采样率联动 | 可选、可取消、进度可见 |
-| **4 · 测试** | fake 协议回归；真实权重修复用例（含噪声/削波/低带宽样本）；UI 冒烟 | 测试通过 |
+| **1 · Python 模块** ✅ **已完成** | 照 §3.2 建 `python/audio_ai_voicefixer/`；`pipeline.py` 实现 mode 分派 + 分块进度/取消；fake / selfcheck / test 齐备 | 可 `ready` 握手、fake 可跑 |
+| **2 · Rust 侧** ✅ **已完成** | `backend.rs` 新增 `VoiceFixer` 枚举与路由；`ai_worker.rs` 新增 `WorkerSpec::voicefixer()` + `find_python_voicefixer()`；`manifest.json` 条目 | 运行时检查可见、可安装 |
+| **3 · 前端** ✅ **已完成** | §3.6 下拉档位 + mode 选择 + 采样率联动 | 可选、可取消、进度可见 |
+| **4 · 测试** ✅ **已完成** | fake 协议回归；真实权重修复用例（含噪声/削波/低带宽样本）；UI 冒烟 | 测试通过（见 §4.2） |
 | **5 · NuWave2 评估** | 评估 NuWave2 是否值得做（对比 AudioSR 的差异化价值、Google Drive 权重方案、旧版 lightning 环境可行性）→ 决定实现或搁置 | 评估结论；若实施则复用阶段 1–4 流程 |
 
 ### 4.1 阶段 0 实测结论（2026-09-09，验证机：Python 3.10 / CPU / 无 GPU / 12 线程）
@@ -309,6 +310,58 @@ models/cache/voicefixer-home/.cache/voicefixer/synthesis_module/44100/model.ckpt
 - `pip install voicefixer` 会额外拉入 `streamlit` / `pandas` / `scikit-learn`（约 200 MB），
   仅服务于官方 demo。实测推理路径不导入这三者，**卸载后推理结果一致** → `requirements-voicefixer.txt`
   给出"先装 torch(CPU) → `voicefixer --no-deps` → 补核心依赖"的精简安装顺序。
+
+**⑥ 权重会在 import 期被自动下载（新增实测，影响实现）**
+
+- `voicefixer/restorer/__init__.py` 与 `voicefixer/vocoder/__init__.py` 在**模块导入时**
+  检查权重，缺失就直接 `urllib.request.urlretrieve` 从 Zenodo 拉取（并往 **stdout** 打印
+  "Downloading…"）—— 两个 record 号还不一致（5600188 / 5469951），本机均 403。
+- 因此实现上 **`import voicefixer` 之前必须先完成缓存重定向**，且必须**先断言权重已就位**：
+  `pipeline.assert_weights_installed()` 在导入前检查两个文件，缺失则直接抛
+  `MODEL_NOT_FOUND`（"请先在模型管理中安装 voicefixer"），不会触发意外联网下载。
+- `warm_up_imports()` 同时把导入期的 stdout 重定向到 stderr，避免污染 JSONL。
+
+### 4.2 阶段 1–4 落地结论（2026-09-09 完成）
+
+**阶段 1 · Python 模块**（`python/audio_ai_voicefixer/`，照 `audio_ai_hifigan` 分层）
+
+- `protocol.py` / `worker.py` 只依赖标准库（ready 握手 0.1 s，不导入 torch）；
+  `pipeline.py` 在收到 `process` 后导入。`worker.py` 额外提供 `parse_mode()`（纯标准库，可单测）。
+- 分块：`chunk=10 s / overlap=0.5 s`，块间**线性交叉淡化**（`OverlapAddWriter`，权重和为 1，
+  NOLA 成立，无电平起伏），输出长度与输入精确一致；每块前检查 `cancel_event`。
+- 输出：单声道逐声道处理 → 各自 f32le 暂存 → 交错编码（长音频不驻留整段 PCM）；
+  采样率固定 **44100**，峰值 > 1 时统一归一化。
+- `selfcheck.py`（依赖 / 缓存重定向 / manifest / 真实推理冒烟）与 `test_worker.py`
+  （清单解析、mode 校验、惰性导入、fake 协议回归含取消、重叠相加）共 **24 个用例全通过**。
+
+**阶段 2 · Rust 侧**
+
+- `Backend::VoiceFixer` + `BackendDefaults { chunk 10 s, overlap 0.5 s }`；
+  `WorkerSpec::voicefixer()` / `voicefixer_fake()` + `find_python_voicefixer()`
+  （`AUDIO_AI_VOICEFIXER_PYTHON` → `AUDIO_AI_PYTHON` → `.venv-voicefixer` → `.venv` → PATH）。
+- 新增 `default_output_sample_rate(backend)`：**VoiceFixer = 44 100**，其余 48 000；
+  `validate_output_sample_rate()` 取代原 `validate_flashsr_sample_rate()`，按后端校验（R2）。
+- `AiProcessRequest` 新增可选 `mode`（`skip_serializing_if = "none"`，其它后端不受影响）。
+- manifest 已登记 `voicefixer`（HF 镜像 source + 真实 size / SHA-256，见 §4.1 ①）。
+
+**阶段 3 · 前端**（`src/QualityView.vue`）
+
+- 下拉新增「语音修复（VoiceFixer）· voicefixer」，提示语标注**面向人声/语音**，
+  并引导音乐场景回 FlashSR / AudioSR（R3）。
+- 修复模式下拉（0 原始 / 1 去高频预处理 / 2 训练模式），默认 0，非 VoiceFixer 时禁用。
+- 采样率控件改为按后端锁定：VoiceFixer 锁定 **44 100 Hz**，FlashSR / AudioSR 锁定 48 000 Hz。
+
+**阶段 4 · 测试**（本机 CPU，真实权重）
+
+| 用例 | 结果 |
+|---|---|
+| 带噪样本（SNR 混合白噪）mode 0 | 44 100 Hz / 12.000 s / 耗时 20.2 s |
+| 削波样本（4× 硬削波）mode 0 | 44 100 Hz / 12.000 s / 17.1 s |
+| 低带宽样本（8 kHz 上采样）mode 0 | 44 100 Hz / 12.000 s / 17.4 s |
+| mode 1 / mode 2 | 均跑通，时长一致 |
+| 取消（60 s 音频，第 12 s 取消） | 收到 `CANCELLED`，停在块边界，无残留半成品 |
+| Rust 集成测试 `voicefixer_real_worker_forward_pass`（`--ignored`） | 通过（6 s 音频 9.7 s） |
+| 回归：`audio_quality` 全部 Rust 测试 27 项、`audio_ai` 16 项、`audio_ai_hifigan` 17 项 | 全通过 |
 
 ---
 
