@@ -245,6 +245,7 @@ src/ImageQualityView.vue                  # 新视图
 | **3 · 前端** | 按 §3.6 加菜单组/子菜单/`ImageQualityView.vue`；`HistoryKind::ImageEnhance` | 可选图、可取消、进度可见、历史可查 |
 | **4 · 测试** | fake worker 协议回归；真实权重前向（小图 + **大图 tiling**，校验输出尺寸 = 输入 × scale）；UI 冒烟 | 测试通过 |
 | **5 · 文档** | 更新 `低质量音频转高品质音频功能规划.md`（或新建图像功能规划）档位表；本计划转"实施中/已完成" | 文档同步 |
+| **6 · 模型扩展** | 接入动漫专用 `realesrgan-x4plus-anime` + 放大倍数选择 UI（`outscale`）+ 可选 `realesrgan-x2plus` / `realesrgan-x1plus` | 多模型下拉可用、倍数可设、动漫图效果更优（见 §8） |
 
 ---
 
@@ -289,3 +290,70 @@ src/ImageQualityView.vue                  # 新视图
 - `src-tauri/src/history.rs:11-47`（`HistoryKind`，新增 kind 无需迁移）
 - `src/App.vue:37-92`、`248-281`（菜单与视图挂载）
 - 上游：https://github.com/xinntao/Real-ESRGAN
+
+---
+
+## 8. 后续扩展（模型与放大倍数）
+
+> 阶段 0–5 完成的是"通用 4× + 单模型"基线。本节把 §1.2/§1.3 已预告的**动漫专用模型**与**倍数选择**拆为可执行的实施任务。
+> 后端协议（`outscale`、独立 `ImageQualityState`、按 `backend` 过滤的 `list_models`）已预留，扩展以**清单 + 权重 + 前端控件**为主，Rust 协议层改动极小。
+
+### 8.1 动漫专用模型 `realesrgan-x4plus-anime`
+
+**背景**：§1.2 已列出 `RealESRGAN_x4plus_anime_6B`（4×，约 17 MB，仅 6 个 RRDB blocks）。
+通用 `x4plus` 处理二次元/插画易出现"油画感"，专用模型对线条、色块更友好且推理更快。
+沿用 §1.3 档位口径：通用（默认）/ 动漫 双档，由用户按图源选择，**不**显示"无损还原"字样。
+
+**manifest 条目**（新增于 `models/manifest.json` 的 `models` 数组）：
+
+```jsonc
+{
+  "id": "realesrgan-x4plus-anime",
+  "backend": "realesrgan",
+  "model_name": "RealESRGAN_x4plus_anime_6B",
+  "version": "v0.1.0",
+  "scale": 4,
+  "file": "cache/realesrgan/RealESRGAN_x4plus_anime_6B.pth",
+  "sha256": "<阶段 0 实测回填>",
+  "size_bytes": "<阶段 0 实测回填>",
+  "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus_anime_6B.pth",
+  "upstream": "https://github.com/xinntao/Real-ESRGAN",
+  "note": "动漫/插画专用，6 blocks 轻量；避免通用模型对二次元图的油画感"
+}
+```
+
+**接入步骤**：
+
+1. 下载权重至 `cache/realesrgan/`，回填 `sha256` / `size_bytes`（MB 级，走常规 SHA-256，无需延迟校验）。
+2. manifest 新增条目：`backend: "realesrgan"`，`list_models()` 按后端过滤**自动纳入**，前端 `modelId` 下拉随即出现。
+3. **关键校验点**：Python worker `selfcheck.py` 必须能探测到该权重并返回其 `model_id`，且与 manifest `id` 命名**完全一致**（`realesrgan-x4plus-anime`）。
+   否则前端 `runtime.models` 不含它，会被 `ImageQualityView.vue:69` 的 `availableModelIds` / `:147` 的回退逻辑过滤掉，下拉里看不到。
+4. UI 无需新增控件：modelId 下拉直接选「动漫」即可；默认档位维持 `realesrgan-x4plus`。
+5. 可选增强：按扩展名/文件名提示"疑似动漫图建议选动漫模型"（非强制）。
+
+### 8.2 放大倍数选择（`outscale`）与更多官方权重
+
+**倍数语义（先澄清，避免口径错误）**：
+
+- **模型训练倍数**（固定）：`x4plus`=4×、`x2plus`=2×、`x1plus`=1×（保真/去模糊，不放大）、`x4plus_anime_6B`=4×。
+- **推理输出倍数 `outscale`**：`ai_worker::AiProcessRequest.outscale: Option<f64>`（`ai_worker.rs:41/87`）已支持，表示**最终输出/输入**倍数；缺省等于模型训练倍数。
+  可设 2 / 4 / 8（甚至非整数），由 Worker 在模型基础放大后做最终 resize。
+
+**前端倍数选择 UI（改动小，协议已预留）**：
+
+- 现状：`ImageQualityView.vue:200` 的 `payload` **未传 `outscale`**，永远走模型默认 4×。
+- 新增倍数下拉（2× / 4× / 8×，或自定义输入），`payload` 补 `outscale: Number`。
+- Rust 侧 `EnhanceImageInput.outscale: Option<f64>` 已存在（`image_quality.rs:265` `outscale: input.outscale` 透传），**无需改后端协议**，仅前端传参与加控件。
+- 注意：`outscale` 与模型训练倍数不一致时（如 x4 模型 + `outscale=2`），需在 `pipeline.py` 明确 `outscale` 优先级（先模型放大再缩到目标倍数），并在任务 `result.scale` 回填**实际输出倍数**供历史展示。
+
+**更多官方权重接入（x2plus / x1plus）**：同 §8.1 模式——
+
+- manifest 新增 `realesrgan-x2plus`、`realesrgan-x1plus` 条目 + 下载权重 + worker `selfcheck` 探测（命名一致）。
+- `x1plus` 用于"去模糊/保真不放大"：UI 需允许 `scale=1`（此时 `outscale` 默认 1，不放大）；档位表 §1.3 可补一行「保真」档。
+
+### 8.3 扩展回归清单（新增模型 / 倍数时必查）
+
+- `enhance_image_list_models` 返回含新 `id`；`enhance_image_check_ai_runtime` 的 `runtime.models` 含新 `id`（否则被前端过滤）。
+- manifest `id` 与 worker `selfcheck` 返回的 `model_id` **完全一致**（命名约定优先于前缀猜测）。
+- UI：modelId 下拉出现新项、倍数下拉生效、任务 `result.scale` 回填正确。
+- 历史 `ImageEnhance` kind 已支持任意 `model_id`（`kind` 为 TEXT 列，无需迁移）。
