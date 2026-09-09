@@ -1,6 +1,6 @@
 # 图像画质提升模块 · Real-ESRGAN 集成实施计划
 
-> 状态：实施中（**阶段 0 完成**：独立 `.venv-realesrgan` 已建、依赖锁定、`requirements-realesrgan.txt` 已落地；官方 `RealESRGANer` 推理路径跑通小图 4× 与大图内部分块，权重体积/SHA-256/直连下载均已实测回填）
+> 状态：实施中（**阶段 1 完成**：Python 模块 `python/image_ai_realesrgan/` 就绪——`pipeline.py` 自研 tile 调度（进度 + 协作式取消，解决 R6）、RGBA/灰度/16-bit 处理（R3）、png/jpg 输出（R5）；`fake_worker.py`/`selfcheck.py`/`test_worker.py` 齐备；14 项单测 + 真实权重自检通过，ready 握手与 fake 全链路验证通过。阶段 0 的环境与权重体积/SHA-256 实测数据已回填）
 > 编制日期：2026-09-09
 > 目标：新增**图像画质提升**模块，并率先接入 **Real-ESRGAN** 作为首个超分辨率后端，
 > 复用音频侧已跑通的「Python Worker + JSONL 协议 + manifest + 独立 venv」范式。

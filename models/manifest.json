@@ -87,6 +87,19 @@
           "source": "https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_256x"
         }
       ]
+    },
+    {
+      "id": "realesrgan-x4plus",
+      "backend": "realesrgan",
+      "name": "RealESRGAN_x4plus.pth",
+      "model_name": "RealESRGAN_x4plus",
+      "version": "v0.1.0",
+      "scale": 4,
+      "file": "cache/realesrgan/RealESRGAN_x4plus.pth",
+      "size_bytes": 67040989,
+      "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+      "upstream": "https://github.com/xinntao/Real-ESRGAN"
     }
   ]
 }
