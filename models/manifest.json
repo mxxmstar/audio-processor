@@ -114,6 +114,19 @@
       "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
       "upstream": "https://github.com/xinntao/Real-ESRGAN",
       "note": "动漫/插画专用，6 blocks 轻量；避免通用模型对二次元图的油画感"
+    },
+    {
+      "id": "realesrgan-x2plus",
+      "backend": "realesrgan",
+      "name": "RealESRGAN_x2plus.pth",
+      "model_name": "RealESRGAN_x2plus",
+      "version": "v0.2.1",
+      "scale": 2,
+      "file": "cache/realesrgan/RealESRGAN_x2plus.pth",
+      "size_bytes": 67061725,
+      "sha256": "49FAFD45F8FD7AA8D31AB2A22D14D91B536C34494A5CFE31EB5D89C2FA266ABB",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+      "upstream": "https://github.com/xinntao/Real-ESRGAN"
     }
   ]
 }

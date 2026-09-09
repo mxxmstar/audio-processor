@@ -335,23 +335,24 @@ src/ImageQualityView.vue                  # 新视图
 
 ### 8.2 放大倍数选择（`outscale`）与更多官方权重
 
+> 状态：倍数选择 UI 已实现（2026-09-09，见 `ImageQualityView.vue` 的 `outscale` 下拉与 `payload.outscale`）；`realesrgan-x2plus` 已实现（2026-09-09）；`x1plus` **无官方预训练权重**，不可接入（见下）。
+
 **倍数语义（先澄清，避免口径错误）**：
 
-- **模型训练倍数**（固定）：`x4plus`=4×、`x2plus`=2×、`x1plus`=1×（保真/去模糊，不放大）、`x4plus_anime_6B`=4×。
+- **模型训练倍数**（固定）：`x4plus`=4×、`x2plus`=2×、`x4plus_anime_6B`=4×。（`x1plus` 官方未发布权重，见"更多官方权重接入"段。）
 - **推理输出倍数 `outscale`**：`ai_worker::AiProcessRequest.outscale: Option<f64>`（`ai_worker.rs:41/87`）已支持，表示**最终输出/输入**倍数；缺省等于模型训练倍数。
   可设 2 / 4 / 8（甚至非整数），由 Worker 在模型基础放大后做最终 resize。
 
-**前端倍数选择 UI（改动小，协议已预留）**：
+**前端倍数选择 UI（已实现，2026-09-09）**：
 
-- 现状：`ImageQualityView.vue:200` 的 `payload` **未传 `outscale`**，永远走模型默认 4×。
-- 新增倍数下拉（2× / 4× / 8×，或自定义输入），`payload` 补 `outscale: Number`。
-- Rust 侧 `EnhanceImageInput.outscale: Option<f64>` 已存在（`image_quality.rs:265` `outscale: input.outscale` 透传），**无需改后端协议**，仅前端传参与加控件。
-- 注意：`outscale` 与模型训练倍数不一致时（如 x4 模型 + `outscale=2`），需在 `pipeline.py` 明确 `outscale` 优先级（先模型放大再缩到目标倍数），并在任务 `result.scale` 回填**实际输出倍数**供历史展示。
+- `ImageQualityView.vue` 已新增「放大倍数」下拉（模型默认 / 2× / 4× / 8×），并在 `start()` 的 `payload` 中补 `outscale: Number`（仅显式选择时传，模型默认走后端 `Option<f64>`）。
+- Rust 侧 `EnhanceImageInput.outscale: Option<f64>` 已存在（`image_quality.rs:265` `outscale: input.outscale` 透传），**无需改后端协议**。
+- `pipeline.py` 中 `outscale` 优先级已明确：先按模型训练倍数放大，再 LANCZOS 重采样到目标倍数；任务 `result.scale` 回填**实际输出倍数**供历史展示。
 
-**更多官方权重接入（x2plus / x1plus）**：同 §8.1 模式——
+**更多官方权重接入**：同 §8.1 模式——
 
-- manifest 新增 `realesrgan-x2plus`、`realesrgan-x1plus` 条目 + 下载权重 + worker `selfcheck` 探测（命名一致）。
-- `x1plus` 用于"去模糊/保真不放大"：UI 需允许 `scale=1`（此时 `outscale` 默认 1，不放大）；档位表 §1.3 可补一行「保真」档。
+- `realesrgan-x2plus`：**已实现（2026-09-09）**。权重 `RealESRGAN_x2plus.pth`（v0.2.1，67.1 MB，sha256 见 `manifest.json`）已下载至 `models/cache/realesrgan/`；`pipeline._build_rrdbnet` 已注册其 `(64,23,32)` 架构，`manifest.json` 已加条目（scale=2）。与倍数选择 UI 组合可实现 2× 原生超分（优于 x4 模型 + `outscale=2` 的缩放回退）。
+- `x1plus`（1× 保真/去模糊）：**官方未发布预训练权重**。Real-ESRGAN 仅公开 `x4plus` / `x2plus` / `x4plus_anime_6B` 三个生成器权重（GitHub releases 无 `x1plus.pth`），故"1× 保真"档**暂不可接入**；若需此能力，须自行训练或换用其它 1× 模型（如 SwinIR），超出本计划范围。
 
 ### 8.3 扩展回归清单（新增模型 / 倍数时必查）
 
