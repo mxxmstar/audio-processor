@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -107,13 +107,30 @@ const formatOptions = [
   { label: "JPG（有损，可调质量）", value: "jpg" },
 ];
 
-const scaleOptions = [
-  { label: "模型默认", value: "" },
-  { label: "2×", value: "2" },
-  { label: "3×", value: "3" },
-  { label: "4×", value: "4" },
-  { label: "8×", value: "8" },
-];
+// 放大倍数：留空 = 模型原生倍数；具体倍数 = 以该倍数输出（模型先超分再缩放）。
+// “模型默认”标签随当前模型原生倍数动态显示，便于直观了解默认结果；
+// 切换模型时重置为“模型默认”，避免沿用上次倍数导致意外输出。
+const selectedModelScale = computed(() => {
+  const m = models.value.find((x) => x.id === modelId.value);
+  return m?.scale ?? 0;
+});
+const scaleOptions = computed(() => {
+  const def = selectedModelScale.value
+    ? `模型默认 (${selectedModelScale.value}×)`
+    : "模型默认";
+  return [
+    { label: def, value: "" },
+    { label: "2×", value: "2" },
+    { label: "3×", value: "3" },
+    { label: "4×", value: "4" },
+    { label: "8×", value: "8" },
+  ];
+});
+
+// 切换模型时重置放大倍数为“模型默认”，避免沿用上一次选择导致意外结果。
+watch(modelId, () => {
+  outscale.value = "";
+});
 
 function statusColor(s: string): string {
   switch (s) {
@@ -428,7 +445,7 @@ onUnmounted(() => {
             :options="scaleOptions"
             style="min-width: 160px"
           />
-          <span class="dim" style="margin-left: 0.5rem">默认按模型倍数（Real-ESRGAN 4× / SwinIR 按模型原生倍数），可选 2× / 3× / 4× / 8×</span>
+          <span class="dim" style="margin-left: 0.5rem">留空 = 模型原生倍数输出（Real-ESRGAN 4× / SwinIR 标注倍数）；选具体倍数 = 以该倍数输出（先超分再缩放）。</span>
         </a-form-item>
 
         <a-form-item v-if="format === 'jpg'" label="JPG 质量">
@@ -455,7 +472,7 @@ onUnmounted(() => {
           </a-button>
         </a-space>
         <div class="hint">
-          输出文件自动生成在源文件旁（默认 .png / 选 JPG 时 .jpg，带尺寸去重），不覆盖原图；放大倍数默认按模型（Real-ESRGAN 4× / SwinIR 按模型原生倍数），可在上方切换 2× / 3× / 4× / 8×。
+          输出文件自动生成在源文件旁（默认 .png / 选 JPG 时 .jpg，带尺寸去重），不覆盖原图；放大倍数留空时按模型原生倍数（Real-ESRGAN 4× / SwinIR 2×·3×·4×），也可手动选择 2× / 3× / 4× / 8× 直接以该倍数输出。
         </div>
       </a-form>
 
