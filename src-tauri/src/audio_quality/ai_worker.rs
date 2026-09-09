@@ -1375,4 +1375,79 @@ mod tests {
         assert!(output.exists(), "真实前向应产出文件");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    // VoiceFixer 真实权重前向验证（环境受限，默认忽略；`cargo test --ignored` 运行）。
+    // 需要 `models/cache/voicefixer-home/.cache/voicefixer/**` 两个权重已安装
+    // （R1：路径由 Worker 在导入前把 USERPROFILE/HOME 重定向得到）且 ffmpeg 可用；
+    // CPU 上 6 s 音频约 10 s。
+    #[tokio::test]
+    #[ignore = "需要 VoiceFixer 真实权重（约 595 MB）+ ffmpeg，且 CPU 推理较慢"]
+    async fn voicefixer_real_worker_forward_pass() {
+        let Some(spec) = WorkerSpec::voicefixer() else {
+            eprintln!("skip: VoiceFixer python runtime unavailable");
+            return;
+        };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let home = root
+            .join("models")
+            .join("cache")
+            .join("voicefixer-home")
+            .join(".cache")
+            .join("voicefixer");
+        for relative in [
+            "analysis_module/checkpoints/vf.ckpt",
+            "synthesis_module/44100/model.ckpt-1490000_trimed.pt",
+        ] {
+            if !home.join(relative).is_file() {
+                eprintln!("skip: missing weight {relative}");
+                return;
+            }
+        }
+        let ffmpeg = root.join("bin").join("ffmpeg.exe");
+        if !ffmpeg.is_file() {
+            eprintln!("skip: ffmpeg not found");
+            return;
+        }
+        let dir = temp_dir();
+        let input = dir.join("input.wav");
+        let output = dir.join("output.flac.part");
+        let status = std::process::Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=6:sample_rate=44100",
+                "-ac",
+                "1",
+                input.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !status.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("skip: ffmpeg failed");
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let mut request = AiProcessRequest::new("test-voicefixer-real", &input, &output);
+        request.model_id = "voicefixer".into();
+        request.device = "cpu".into();
+        request.chunk_seconds = 10.0;
+        request.overlap_seconds = 0.5;
+        // §3.5：VoiceFixer 原生 44.1 kHz，填 48k 会被 Python 侧拒绝（R2）
+        request.output_sample_rate = Some(44_100);
+        request.mode = Some(0);
+
+        let run = run_worker(&spec, &request, None).await.unwrap();
+        assert_eq!(run.result.model_id, "voicefixer");
+        assert_eq!(run.result.sample_rate, 44_100, "VoiceFixer 输出必须 44.1 kHz");
+        assert!(
+            (run.result.duration_seconds - 6.0).abs() < 0.1,
+            "输出时长应与输入一致: {}",
+            run.result.duration_seconds
+        );
+        assert!(output.exists(), "真实前向应产出文件");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
