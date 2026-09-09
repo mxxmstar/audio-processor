@@ -300,6 +300,8 @@ src/ImageQualityView.vue                  # 新视图
 
 ### 8.1 动漫专用模型 `realesrgan-x4plus-anime`
 
+> 状态：已实现（2026-09-09）。权重 `RealESRGAN_x4plus_anime_6B.pth`（v0.2.2.4，17.1 MB，sha256 见 `manifest.json` 条目）已下载至 `models/cache/realesrgan/` 并回填真实校验值；`pipeline._build_rrdbnet` 已注册该架构，前端 `modelId` 下拉自动出现此选项，无需改 Rust/前端。
+
 **背景**：§1.2 已列出 `RealESRGAN_x4plus_anime_6B`（4×，约 17 MB，仅 6 个 RRDB blocks）。
 通用 `x4plus` 处理二次元/插画易出现"油画感"，专用模型对线条、色块更友好且推理更快。
 沿用 §1.3 档位口径：通用（默认）/ 动漫 双档，由用户按图源选择，**不**显示"无损还原"字样。
@@ -314,8 +316,8 @@ src/ImageQualityView.vue                  # 新视图
   "version": "v0.1.0",
   "scale": 4,
   "file": "cache/realesrgan/RealESRGAN_x4plus_anime_6B.pth",
-  "sha256": "<阶段 0 实测回填>",
-  "size_bytes": "<阶段 0 实测回填>",
+  "sha256": "F872D837D3C90ED2E05227BED711AF5671A6FD1C9F7D7E91C911A61F155E99DA",
+  "size_bytes": 17938799,
   "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus_anime_6B.pth",
   "upstream": "https://github.com/xinntao/Real-ESRGAN",
   "note": "动漫/插画专用，6 blocks 轻量；避免通用模型对二次元图的油画感"

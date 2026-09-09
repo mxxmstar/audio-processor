@@ -100,6 +100,20 @@
       "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
       "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
       "upstream": "https://github.com/xinntao/Real-ESRGAN"
+    },
+    {
+      "id": "realesrgan-x4plus-anime",
+      "backend": "realesrgan",
+      "name": "RealESRGAN_x4plus_anime_6B.pth",
+      "model_name": "RealESRGAN_x4plus_anime_6B",
+      "version": "v0.2.2.4",
+      "scale": 4,
+      "file": "cache/realesrgan/RealESRGAN_x4plus_anime_6B.pth",
+      "size_bytes": 17938799,
+      "sha256": "F872D837D3C90ED2E05227BED711AF5671A6FD1C9F7D7E91C911A61F155E99DA",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+      "upstream": "https://github.com/xinntao/Real-ESRGAN",
+      "note": "动漫/插画专用，6 blocks 轻量；避免通用模型对二次元图的油画感"
     }
   ]
 }
