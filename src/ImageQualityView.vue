@@ -80,6 +80,7 @@ const modelTitle: Record<string, string> = {
   "swinir-classical-x4": "SwinIR 经典 4× 超分（DIV2K 训练）",
   "swinir-real-x4": "SwinIR 真实世界 4× 超分（BSRGAN 退化）",
   "gfpgan-v1.4": "GFPGAN 人脸修复 2× 修复（通用）",
+  "realesr-general-x4v3": "Real-ESRGAN 通用盲超分 4× 背景修复（x4v3，真实退化）",
 };
 const modelOptions = computed(() => {
   const list = models.value.length

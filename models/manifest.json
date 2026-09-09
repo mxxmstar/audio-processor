@@ -186,6 +186,17 @@
       "sha256": "deferred",
       "source": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth",
       "upstream": "https://github.com/TencentARC/GFPGAN"
+      },
+      {
+        "id": "realesr-general-x4v3",
+        "backend": "realesrgan",
+        "model_name": "realesr-general-x4v3",
+        "version": "v0.3.0",
+        "scale": 4,
+        "file": "cache/realesrgan/realesr-general-x4v3.pth",
+        "sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+        "source": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+        "upstream": "https://github.com/xinntao/Real-ESRGAN"
       }
       ]
 }

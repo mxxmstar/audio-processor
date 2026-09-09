@@ -67,6 +67,7 @@ def warm_up_imports() -> None:
         with contextlib.redirect_stdout(buffer):
             import basicsr  # noqa: F401
             from basicsr.archs.rrdbnet_arch import RRDBNet  # noqa: F401
+            from basicsr.archs.srvgg_arch import SRVGGNetCompact  # noqa: F401
             import realesrgan  # noqa: F401
             import cv2  # noqa: F401
     finally:
@@ -507,17 +508,71 @@ def _get_gfpgan_runner(spec: "worker.ModelSpec", device: torch.device) -> GFPGAN
         return runner
 
 
+class SRVGGRunner(RealESRGANRunner):
+    """SRVGGNetCompact 后端（`realesr-general-x4v3`）：通用盲超分 / 背景修复。
+
+    x4v3 是 Real-ESRGAN 官方的轻量 VGG 型网络（4.9MB，远小于 x4plus 的 RRDBNet），
+    针对真实世界随机退化训练，最适合做「背景超分」。其前向、`tile` 分块、预处理
+    （`upscale` 已把输入归一化到 [0,1]）与基类完全一致，仅网络构造与权重加载不同，
+    故继承 `RealESRGANRunner` 并仅覆写 `__init__`。
+    """
+
+    def __init__(self, model_path: str, model_name: str, scale: int, device: torch.device) -> None:
+        from basicsr.archs.srvgg_arch import SRVGGNetCompact
+
+        # 官方 x4v3 固定结构：64 通道 / 32 卷积层 / PReLU / scale 由 manifest 给出。
+        # 注意：本环境 basicsr 的 SRVGGNetCompact 签名为
+        # (num_in_ch, num_out_ch, num_feat, num_conv, upscale, act_type)，
+        # 无 num_grow_ch；x4v3 权重经实测需 num_conv=32 才能 strict 加载（约 4.9MB）。
+        model = SRVGGNetCompact(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_conv=32,
+            upscale=scale,
+            act_type="prelu",
+        )
+        loadnet = torch.load(model_path, map_location="cpu")
+        keyname = "params_ema" if "params_ema" in loadnet else "params"
+        model.load_state_dict(loadnet[keyname], strict=True)
+        model.eval()
+        self.model = model.to(device)
+        self.scale = scale
+        self.device = device
+        self.img = None
+        self.mod_pad_h = 0
+        self.mod_pad_w = 0
+
+
+def _get_srvgg_runner(spec: "worker.ModelSpec", device: torch.device) -> SRVGGRunner:
+    weight_path = str(spec.artifacts[0][1])
+    key = (weight_path, spec.model_name, int(spec.scale), str(device))
+    with _RUNNER_LOCK:
+        runner = _RUNNER_CACHE.get(key)
+        if runner is None:
+            runner = SRVGGRunner(
+                model_path=weight_path,
+                model_name=spec.model_name,
+                scale=int(spec.scale),
+                device=device,
+            )
+            _RUNNER_CACHE[key] = runner
+        return runner
+
+
 def get_runner(spec: "worker.ModelSpec", device: torch.device) -> RealESRGANRunner:
     """按 (权重路径, 模型名, 倍数, 设备) 缓存已加载的模型，避免重复加载。
 
-    按 `spec.backend` 选择后端：realesrgan 走 `RealESRGANRunner`，swinir 走
-    `SwinIRRunner`，gfpgan 走 `GFPGANRunner`；三者接口一致（`upscale` 同签名），
-    `enhance` 无需区分。
+    按 `spec.backend` 选择后端：realesrgan 走 `RealESRGANRunner`（RRDBNet）或
+    `SRVGGRunner`（x4v3 轻量盲超分），swinir 走 `SwinIRRunner`，gfpgan 走
+    `GFPGANRunner`；四者接口一致（`upscale` 同签名），`enhance` 无需区分。
     """
     if spec.backend == "gfpgan":
         return _get_gfpgan_runner(spec, device)
     if spec.backend == "swinir":
         return _get_swinir_runner(spec, device)
+    if spec.backend == "realesrgan" and spec.model_name == "realesr-general-x4v3":
+        return _get_srvgg_runner(spec, device)
     weight_path = str(spec.artifacts[0][1])
     key = (weight_path, spec.model_name, int(spec.scale), str(device))
     with _RUNNER_LOCK:
