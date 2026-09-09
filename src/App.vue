@@ -9,6 +9,7 @@ import HistoryView from "./HistoryView.vue";
 import Aria2View from "./Aria2View.vue";
 import QualityView from "./QualityView.vue";
 import OptimizeView from "./OptimizeView.vue";
+import ImageQualityView from "./ImageQualityView.vue";
 import PortCheckView from "./PortCheckView.vue";
 import {
   DownloadOutlined,
@@ -20,6 +21,7 @@ import {
   CloudDownloadOutlined,
   SoundOutlined,
   ApiOutlined,
+  PictureOutlined,
 } from "@ant-design/icons-vue";
 
 type ViewKey =
@@ -32,6 +34,8 @@ type ViewKey =
   | "quality"
   | "quality-history"
   | "optimize"
+  | "image-quality"
+  | "image-quality-history"
   | "port-check";
 const active = ref<ViewKey>("download");
 // 子菜单展开状态（受控）
@@ -42,7 +46,7 @@ const openKeys = ref<string[]>([]);
 // 只对真实写入 `history.db` 的 3 种类型显示徽标（recognize / download / enhance）。
 // **aria2 的历史不在这张表里**（`HistoryKind` 没有 aria2 变体，也没有任何写入点），
 // 给它加徽标会恒为 0，看上去像功能坏了，故刻意不加。详见 docs/遗留待办汇总.md C1。
-const HISTORY_KINDS = ["recognize", "download", "enhance"] as const;
+const HISTORY_KINDS = ["recognize", "download", "enhance", "image_enhance"] as const;
 type HistoryKind = (typeof HISTORY_KINDS)[number];
 
 // 菜单里的「历史记录」子项 → 实际历史类型
@@ -50,12 +54,14 @@ const badgeKindByMenuKey: Record<string, HistoryKind> = {
   "download-history": "download",
   history: "recognize",
   "quality-history": "enhance",
+  "image-quality-history": "image_enhance",
 };
 
 const historyCounts = ref<Record<HistoryKind, number>>({
   recognize: 0,
   download: 0,
   enhance: 0,
+  image_enhance: 0,
 });
 
 async function refreshHistoryCounts() {
@@ -135,6 +141,19 @@ const items = computed(() => [
     ],
   },
   {
+    key: "image-quality-group",
+    icon: h(PictureOutlined),
+    label: "图像画质提升",
+    children: [
+      { key: "image-quality", icon: h(PictureOutlined), label: "画质超分" },
+      {
+        key: "image-quality-history",
+        icon: h(HistoryOutlined),
+        label: historyLabel("image-quality-history"),
+      },
+    ],
+  },
+  {
     key: "port-check",
     icon: h(ApiOutlined),
     label: "端口占用",
@@ -152,6 +171,8 @@ const leafKeys: string[] = [
   "quality",
   "quality-history",
   "optimize",
+  "image-quality",
+  "image-quality-history",
   "port-check",
 ];
 
@@ -352,6 +373,12 @@ onUnmounted(() => {
         />
         <quality-view v-else-if="active === 'quality'" key="view-quality" />
         <optimize-view v-else-if="active === 'optimize'" key="view-optimize" />
+        <image-quality-view v-else-if="active === 'image-quality'" key="view-image-quality" />
+        <history-view
+          v-else-if="active === 'image-quality-history'"
+          key="view-history-image-quality"
+          kind="image_enhance"
+        />
         <history-view
           v-else-if="active === 'quality-history'"
           key="view-history-quality"
