@@ -372,6 +372,22 @@ pub async fn resolve_collection(
 ///
 /// 通过 `Semaphore` 限制并发数；任一视频解析失败则整体返回该错误。
 /// `on_resolve` 每完成一个视频调用一次（已完成数, 总数, 标题）。
+///
+/// 供命令层在已知 bvid 列表时直接调用（如从 `view` 的 `ugc_season.episodes`
+/// 提取合集分集，从而避开 `seasons_archives_list` 的 -352 风控）。
+pub async fn resolve_bvids(
+    client: &BiliClient,
+    bvids: Vec<String>,
+    prefer_format: i64,
+    on_resolve: Option<Arc<dyn Fn(usize, usize, &str) + Send + Sync>>,
+) -> Result<Vec<ResolveResult>> {
+    resolve_videos_parallel(client, bvids, prefer_format, on_resolve).await
+}
+
+/// 并发解析一组 bvid（保持入参顺序返回）
+///
+/// 通过 `Semaphore` 限制并发数；单个视频解析失败仅跳过该项（不再整体中断）。
+/// `on_resolve` 每完成一个视频调用一次（已完成数, 总数, 标题）。
 async fn resolve_videos_parallel(
     client: &BiliClient,
     bvids: Vec<String>,

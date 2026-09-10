@@ -242,17 +242,30 @@ pub async fn bili_resolve(
                 .await
                 .map_err(|e| e.to_string())?;
             if info.ugc_season.id > 0 {
-                let (r, g) = video::resolve_collection(
-                    &client,
-                    &info.owner.mid.to_string(),
-                    &info.ugc_season.id.to_string(),
-                    prefer,
-                    None,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                group_opt = Some(g);
-                r
+                // 直接从 view 返回的 ugc_season.episodes 取合集分集，
+                // 避免再调 seasons_archives_list（该接口被风控拦截，稳定返回 -352）。
+                let mut bvids: Vec<String> = info
+                    .ugc_season
+                    .episodes
+                    .iter()
+                    .map(|e| e.bvid.clone())
+                    .filter(|b| !b.is_empty())
+                    .collect();
+                if bvids.is_empty() {
+                    bvids.push(bvid.clone());
+                }
+                let group = TaskGroup {
+                    id: info.ugc_season.id.to_string(),
+                    title: if info.ugc_season.title.is_empty() {
+                        info.title.clone()
+                    } else {
+                        info.ugc_season.title.clone()
+                    },
+                };
+                group_opt = Some(group);
+                video::resolve_bvids(&client, bvids, prefer, None)
+                    .await
+                    .map_err(|e| e.to_string())?
             } else {
                 vec![video::resolve_video(&client, &bvid, prefer)
                     .await
@@ -265,17 +278,28 @@ pub async fn bili_resolve(
                 .await
                 .map_err(|e| e.to_string())?;
             if info.ugc_season.id > 0 {
-                let (r, g) = video::resolve_collection(
-                    &client,
-                    &info.owner.mid.to_string(),
-                    &info.ugc_season.id.to_string(),
-                    prefer,
-                    None,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                group_opt = Some(g);
-                r
+                let mut bvids: Vec<String> = info
+                    .ugc_season
+                    .episodes
+                    .iter()
+                    .map(|e| e.bvid.clone())
+                    .filter(|b| !b.is_empty())
+                    .collect();
+                if bvids.is_empty() {
+                    bvids.push(info.bvid.clone());
+                }
+                let group = TaskGroup {
+                    id: info.ugc_season.id.to_string(),
+                    title: if info.ugc_season.title.is_empty() {
+                        info.title.clone()
+                    } else {
+                        info.ugc_season.title.clone()
+                    },
+                };
+                group_opt = Some(group);
+                video::resolve_bvids(&client, bvids, prefer, None)
+                    .await
+                    .map_err(|e| e.to_string())?
             } else {
                 vec![video::resolve_video(&client, &info.bvid, prefer)
                     .await

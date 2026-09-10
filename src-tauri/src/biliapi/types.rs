@@ -158,6 +158,22 @@ pub struct UgcSeason {
     /// 合集标题
     #[serde(default)]
     pub title: String,
+    /// 合集内全部分集（view 接口直接返回，无需再调 seasons_archives_list）
+    #[serde(default)]
+    pub episodes: Vec<UgcEpisode>,
+}
+
+/// 合集内单个分集（view 接口 ugc_season.episodes 元素）
+#[derive(Debug, Deserialize, Default)]
+pub struct UgcEpisode {
+    #[serde(default)]
+    pub bvid: String,
+    #[serde(default)]
+    pub aid: i64,
+    #[serde(default)]
+    pub cid: i64,
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
