@@ -154,10 +154,21 @@ mod tests {
 
     #[test]
     fn list_models_reads_backend_field() {
-        // 不混入音频后端模型；真实仓库 manifest 含 realesrgan-x4plus，过滤后只返回它。
+        // 不混入音频后端模型；真实仓库 manifest 含 realesrgan / swinir / gfpgan
+        // 三类图像后端，过滤后只应出现它们（数量随清单增长，故不写死）。
         let models = list_models();
         for model in &models {
-            assert_eq!(model.backend, "realesrgan");
+            assert!(
+                matches!(model.backend.as_str(), "realesrgan" | "swinir" | "gfpgan"),
+                "出现了非图像后端: {:?}",
+                model
+            );
+        }
+        for audio_id in ["flashsr", "audiosr-basic", "voicefixer"] {
+            assert!(
+                !models.iter().any(|model| model.id == audio_id),
+                "音频模型 {audio_id} 混入了图像模型列表: {models:?}"
+            );
         }
     }
 }

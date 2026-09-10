@@ -170,12 +170,18 @@ pub fn select_worker_spec(model_id: &str) -> Result<(WorkerSpec, String), String
     spec.ok_or_else(|| "找不到 Python AI Worker 或 Python 运行时".into())
 }
 
-/// 列出 manifest 中全部模型及其后端，供前端渲染可选模型。
+/// 列出 manifest 中**音频域**的模型及其后端，供前端渲染可选模型。
+///
+/// 共享 manifest 同时含图像域模型（realesrgan / swinir / gfpgan）。不过滤会
+/// 让「音质提升」的下拉里出现图像超分模型（`Backend::parse` 对它们返回
+/// `Unknown`），用户选了也无法处理音频。图像侧 `image_quality::list_models`
+/// 同样按 backend 过滤，两侧对称。
 pub fn list_models() -> Vec<ModelInfo> {
     match read_manifest() {
         Some(manifest) => manifest
             .models
             .into_iter()
+            .filter(|entry| !matches!(Backend::parse(&entry.backend), Backend::Unknown))
             .map(|entry| ModelInfo {
                 id: entry.id,
                 backend: Backend::parse(&entry.backend).as_str().to_string(),
@@ -296,15 +302,22 @@ mod tests {
             assert!(
                 matches!(
                     model.backend.as_str(),
-                    "flashsr"
-                        | "audiosr"
-                        | "deepfilternet"
-                        | "hifigan"
-                        | "voicefixer"
-                        | "unknown"
+                    "flashsr" | "audiosr" | "deepfilternet" | "hifigan" | "voicefixer"
                 ),
                 "出现了非音频后端: {:?}",
                 model
+            );
+        }
+    }
+
+    #[test]
+    fn list_models_excludes_image_backends() {
+        // 回归：共享 manifest 里的图像模型不得出现在「音质提升」下拉中
+        let models = list_models();
+        for image_id in ["realesrgan-x4plus", "swinir-classical-x4", "gfpgan-v1.4"] {
+            assert!(
+                !models.iter().any(|model| model.id == image_id),
+                "图像模型 {image_id} 混入了音频模型列表: {models:?}"
             );
         }
     }
