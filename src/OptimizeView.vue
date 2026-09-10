@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -203,14 +203,6 @@ async function loadModels() {
   }
 }
 
-async function loadTasks() {
-  try {
-    tasks.value = await invoke<QualityTask[]>("audio_quality_list_tasks");
-  } catch {
-    // 列表加载失败不打断使用
-  }
-}
-
 async function pickFile() {
   try {
     const sel = await open({
@@ -247,9 +239,8 @@ async function start() {
       },
     });
     activeTask.value = task;
-    if (!tasks.value.some((t) => t.id === task.id)) {
-      tasks.value = [task, ...tasks.value];
-    }
+    // 只保留当前记录：用新任务替换历史列表，不累积过往任务
+    tasks.value = [task];
     message.success("已开始音质优化");
   } catch (e) {
     message.error("启动失败：" + String(e));
@@ -303,7 +294,7 @@ async function openDir(path: string) {
 let off: UnlistenFn | null = null;
 
 onMounted(async () => {
-  await Promise.all([loadModels(), checkRuntime(), loadTasks()]);
+  await Promise.all([loadModels(), checkRuntime()]);
   off = await listen<QualityTask>("audio-quality-progress", (e) => {
     const t = e.payload;
     const idx = tasks.value.findIndex((x) => x.id === t.id);
@@ -315,9 +306,6 @@ onMounted(async () => {
     if (activeTask.value?.id === t.id) activeTask.value = t;
   });
 });
-
-// keep-alive 下重新可见时与后端任务列表同步
-onActivated(loadTasks);
 
 onUnmounted(() => {
   off?.();
