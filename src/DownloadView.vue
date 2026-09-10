@@ -366,11 +366,30 @@ function cancelPreview() {
   message.value = "已取消合集选择";
 }
 
-function togglePreview(bvid: string) {
-  const s = new Set(previewSelected.value);
-  if (s.has(bvid)) s.delete(bvid);
-  else s.add(bvid);
-  previewSelected.value = s;
+// Shift（连续区间）+ Ctrl/Cmd（间隔多选）+ 普通点击 的列表勾选逻辑
+// 语义对齐文件管理器：普通点击选中单项；Ctrl 点击切换单个；Shift 点击选中从锚点到当前项的连续区间
+const lastClicked = ref<number | null>(null);
+
+function selectEpisode(index: number, ev: MouseEvent) {
+  const pv = preview.value;
+  if (!pv) return;
+  const bvid = pv.episodes[index].bvid;
+  if (ev.shiftKey && lastClicked.value !== null) {
+    const a = Math.min(lastClicked.value, index);
+    const b = Math.max(lastClicked.value, index);
+    const s = new Set<string>();
+    for (let i = a; i <= b; i++) s.add(pv.episodes[i].bvid);
+    previewSelected.value = s;
+  } else if (ev.ctrlKey || ev.metaKey) {
+    const s = new Set(previewSelected.value);
+    if (s.has(bvid)) s.delete(bvid);
+    else s.add(bvid);
+    previewSelected.value = s;
+    lastClicked.value = index;
+  } else {
+    previewSelected.value = new Set([bvid]);
+    lastClicked.value = index;
+  }
 }
 
 function selectAllPreview() {
@@ -892,39 +911,42 @@ onActivated(() => {
       </a-result>
     </a-card>
 
-    <!-- 合集预览：先展示分集勾选列表，用户确认后再只解析选中项 -->
-    <a-modal
-      :open="!!preview"
-      :title="preview ? `合集「${preview.title}」· 请勾选要下载的分集` : ''"
-      :confirm-loading="resolving"
-      ok-text="解析选中分集"
-      cancel-text="取消"
-      @ok="confirmPreview"
-      @cancel="cancelPreview"
-      width="640px"
-    >
-      <template v-if="preview">
-        <div class="preview-summary">
-          共 {{ preview.episodes.length }} 个分集，已选
-          <b>{{ previewSelected.size }}</b> 个
-          <a-button type="link" size="small" @click="selectAllPreview">全选</a-button>
-          <a-button type="link" size="small" @click="clearAllPreview">全不选</a-button>
-        </div>
-        <a-list :data-source="preview.episodes" size="small" class="preview-list">
-          <template #renderItem="{ item }">
-            <a-list-item>
-              <a-checkbox
-                :checked="previewSelected.has(item.bvid)"
-                @change="togglePreview(item.bvid)"
-              >
-                <span class="ep-index">P{{ item.index }}</span>
-                <span class="ep-title">{{ item.title }}</span>
-              </a-checkbox>
-            </a-list-item>
-          </template>
-        </a-list>
+    <!-- 合集预览：直接在页面内展示分集勾选列表，用户确认后再只解析选中项 -->
+    <a-card v-if="preview" class="preview-panel" :bordered="true">
+      <template #title>
+        合集「{{ preview.title }}」· 请勾选要下载的分集
       </template>
-    </a-modal>
+      <div class="preview-summary">
+        共 {{ preview.episodes.length }} 个分集，已选
+        <b>{{ previewSelected.size }}</b> 个
+        <span class="preview-hint"
+          >（普通点击选中单项 · Ctrl 点击切换单个 · Shift 点击选连续区间）</span
+        >
+        <a-button type="link" size="small" @click="selectAllPreview">全选</a-button>
+        <a-button type="link" size="small" @click="clearAllPreview">全不选</a-button>
+        <a-button
+          type="primary"
+          size="small"
+          :loading="resolving"
+          :disabled="previewSelected.size === 0"
+          @click="confirmPreview"
+          >解析选中分集</a-button
+        >
+        <a-button size="small" :disabled="resolving" @click="cancelPreview">取消</a-button>
+      </div>
+      <a-list :data-source="preview.episodes" size="small" class="preview-list" :grid="undefined">
+        <template #renderItem="{ item, index }">
+          <a-list-item
+            :class="['ep-item', previewSelected.has(item.bvid) ? 'ep-selected' : '']"
+            @click="selectEpisode(index, $event)"
+          >
+            <span class="ep-check">{{ previewSelected.has(item.bvid) ? "✓" : "" }}</span>
+            <span class="ep-index">P{{ item.index }}</span>
+            <span class="ep-title">{{ item.title }}</span>
+          </a-list-item>
+        </template>
+      </a-list>
+    </a-card>
   </div>
 </template>
 
@@ -1049,10 +1071,18 @@ onActivated(() => {
   color: #8a94a6;
   font-size: 0.8rem;
 }
+.preview-panel {
+  margin-top: 1rem;
+}
 .preview-summary {
   margin-bottom: 0.75rem;
   color: #5a6473;
   font-size: 0.9rem;
+}
+.preview-hint {
+  color: #8a94a6;
+  font-size: 0.8rem;
+  margin-left: 0.25rem;
 }
 .preview-list {
   max-height: 50vh;
@@ -1060,13 +1090,49 @@ onActivated(() => {
   border: 1px solid #f0f0f0;
   border-radius: 6px;
 }
-.preview-list .ep-index {
+.preview-list .ant-list-item {
+  transition: background 0.12s;
+}
+.ep-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  user-select: none;
+}
+.ep-item:hover {
+  background: #f5f8ff;
+}
+.ep-item.ep-selected {
+  background: #e6f0ff;
+}
+.ep-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 3px;
+  border: 1px solid #c5ccd6;
+  color: #1677ff;
+  font-weight: 700;
+}
+.ep-item.ep-selected .ep-check {
+  border-color: #1677ff;
+  background: #1677ff;
+  color: #fff;
+}
+.ep-index {
   display: inline-block;
   min-width: 2.4rem;
   color: #8a94a6;
   font-variant-numeric: tabular-nums;
 }
-.preview-list .ep-title {
-  margin-left: 0.5rem;
+.ep-title {
+  margin-left: 0.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
