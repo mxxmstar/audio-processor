@@ -92,6 +92,18 @@ interface ResolveFinished {
   resolved: number;
 }
 
+// 合集预览：视频属于某个合集时返回分集列表，供先勾选再解析
+interface CollectionEpisode {
+  index: number;
+  bvid: string;
+  title: string;
+}
+interface CollectionPreview {
+  id: string;
+  title: string;
+  episodes: CollectionEpisode[];
+}
+
 // 从左侧栏接收登录态（登录态统一在 App.vue 管理）；未登录时请求拉起登录二维码
 const props = defineProps<{ loggedIn: boolean }>();
 const emit = defineEmits<{ (e: "requestLogin"): void }>();
@@ -110,6 +122,10 @@ const resolving = ref(false);
 const downloading = ref(false);
 const paused = ref(false);
 const message = ref("");
+
+// 合集预览：检测到视频属于合集时，先展示分集勾选列表
+const preview = ref<CollectionPreview | null>(null);
+const previewSelected = ref<Set<string>>(new Set()); // 已勾选的分集 bvid
 
 // 勾选状态：以任务 id 为键的集合，仅勾选的任务会被下载
 const selectedIds = ref<Set<string>>(new Set());
@@ -285,6 +301,18 @@ async function doResolve() {
   resolving.value = true;
   message.value = "解析中…";
   try {
+    // 先判断是否为合集：是则展示分集勾选列表，用户确认后再只解析选中项
+    const pv = await invoke<CollectionPreview | null>("bili_preview", {
+      input: { input: inputUrl.value.trim() },
+    });
+    if (pv && pv.episodes.length > 0) {
+      preview.value = pv;
+      previewSelected.value = new Set(pv.episodes.map((e) => e.bvid));
+      resolving.value = false;
+      message.value = `检测到合集「${pv.title}」，共 ${pv.episodes.length} 个分集，请勾选要下载的分集`;
+      return;
+    }
+    // 非合集：按原流程解析
     await invoke("bili_resolve_async", {
       input: {
         input: inputUrl.value.trim(),
@@ -299,6 +327,59 @@ async function doResolve() {
     tasks.value = [];
     resolving.value = false;
   }
+}
+
+// 确认下载合集中勾选的分集：用选中的 bvid 列表调用解析，只解析选中项
+async function confirmPreview() {
+  if (!preview.value) return;
+  const sel = preview.value.episodes
+    .filter((e) => previewSelected.value.has(e.bvid))
+    .map((e) => e.bvid);
+  if (sel.length === 0) {
+    message.value = "请至少勾选一个分集";
+    return;
+  }
+  const pv = preview.value;
+  preview.value = null;
+  resolving.value = true;
+  message.value = `解析选中分集（${sel.length} 个）…`;
+  try {
+    await invoke("bili_resolve_async", {
+      input: {
+        input: inputUrl.value.trim(),
+        mode: mode.value,
+        preferFormat: preferFormat.value,
+        outputDir: outputDir.value || null,
+        bvids: sel,
+      },
+    });
+  } catch (e) {
+    message.value = String(e);
+    tasks.value = [];
+    resolving.value = false;
+  }
+}
+
+function cancelPreview() {
+  preview.value = null;
+  resolving.value = false;
+  message.value = "已取消合集选择";
+}
+
+function togglePreview(bvid: string) {
+  const s = new Set(previewSelected.value);
+  if (s.has(bvid)) s.delete(bvid);
+  else s.add(bvid);
+  previewSelected.value = s;
+}
+
+function selectAllPreview() {
+  if (!preview.value) return;
+  previewSelected.value = new Set(preview.value.episodes.map((e) => e.bvid));
+}
+
+function clearAllPreview() {
+  previewSelected.value = new Set();
 }
 
 async function doDownload() {
@@ -810,6 +891,40 @@ onActivated(() => {
         </template>
       </a-result>
     </a-card>
+
+    <!-- 合集预览：先展示分集勾选列表，用户确认后再只解析选中项 -->
+    <a-modal
+      :open="!!preview"
+      :title="preview ? `合集「${preview.title}」· 请勾选要下载的分集` : ''"
+      :confirm-loading="resolving"
+      ok-text="解析选中分集"
+      cancel-text="取消"
+      @ok="confirmPreview"
+      @cancel="cancelPreview"
+      width="640px"
+    >
+      <template v-if="preview">
+        <div class="preview-summary">
+          共 {{ preview.episodes.length }} 个分集，已选
+          <b>{{ previewSelected.size }}</b> 个
+          <a-button type="link" size="small" @click="selectAllPreview">全选</a-button>
+          <a-button type="link" size="small" @click="clearAllPreview">全不选</a-button>
+        </div>
+        <a-list :data-source="preview.episodes" size="small" class="preview-list">
+          <template #renderItem="{ item }">
+            <a-list-item>
+              <a-checkbox
+                :checked="previewSelected.has(item.bvid)"
+                @change="togglePreview(item.bvid)"
+              >
+                <span class="ep-index">P{{ item.index }}</span>
+                <span class="ep-title">{{ item.title }}</span>
+              </a-checkbox>
+            </a-list-item>
+          </template>
+        </a-list>
+      </template>
+    </a-modal>
   </div>
 </template>
 
@@ -933,5 +1048,25 @@ onActivated(() => {
 .grp-count {
   color: #8a94a6;
   font-size: 0.8rem;
+}
+.preview-summary {
+  margin-bottom: 0.75rem;
+  color: #5a6473;
+  font-size: 0.9rem;
+}
+.preview-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+.preview-list .ep-index {
+  display: inline-block;
+  min-width: 2.4rem;
+  color: #8a94a6;
+  font-variant-numeric: tabular-nums;
+}
+.preview-list .ep-title {
+  margin-left: 0.5rem;
 }
 </style>

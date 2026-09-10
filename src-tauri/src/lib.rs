@@ -75,6 +75,7 @@ pub fn run() {
             // 阶段 5：B 站下载命令
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,
+            commands::bili::bili_preview,
             commands::bili::bili_start_download,
             commands::bili::bili_pause_download,
             commands::bili::bili_stop_download,

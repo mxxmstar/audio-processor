@@ -39,6 +39,34 @@ pub struct ResolveInput {
     /// 输出目录（缺省用配置目录）
     #[serde(default)]
     pub output_dir: Option<String>,
+    /// 仅解析指定的分集 bvid 列表（合集场景下，前端先预览分集列表、
+    /// 用户勾选后再传入，避免一次性解析全部分集）。为 None 时按 input 自动识别。
+    #[serde(default)]
+    pub bvids: Option<Vec<String>>,
+}
+
+/// 合集预览中的单个分集
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionEpisode {
+    /// 分集序号（从 1 开始）
+    pub index: usize,
+    /// 分集 BV 号
+    pub bvid: String,
+    /// 分集标题
+    pub title: String,
+}
+
+/// 合集预览结果：视频属于某个合集时返回分集列表，供前端勾选
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPreview {
+    /// 合集 id
+    pub id: String,
+    /// 合集标题
+    pub title: String,
+    /// 全部分集
+    pub episodes: Vec<CollectionEpisode>,
 }
 
 /// 启动下载请求
@@ -235,7 +263,14 @@ pub async fn bili_resolve(
     // 识别目标类型并分发解析
     let target = identify(&input.input);
     let mut group_opt: Option<TaskGroup> = None;
-    let results = match target {
+    // 若前端已传入勾选的分集 bvid 列表，则只解析这些分集（跳过合集自动展开）
+    let results = if let Some(sel) = input.bvids.clone().filter(|v| !v.is_empty()) {
+        group_opt = None;
+        video::resolve_bvids(&client, sel, prefer, None)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        match target {
         Target::Bv(bvid) => {
             // 先取视频详情，判断是否属于合集（ugc_season）
             let info = video::get_video_info(&client, &bvid)
@@ -316,6 +351,7 @@ pub async fn bili_resolve(
         Target::Season(ssid) => video::resolve_season(&client, &ssid, prefer, None)
             .await
             .map_err(|e| e.to_string())?,
+        }
     };
 
     let root = input.output_dir.clone().unwrap_or_else(|| {
@@ -332,6 +368,65 @@ pub async fn bili_resolve(
 
     state.set_tasks(tasks.clone());
     Ok(tasks)
+}
+
+/// 合集预览：识别输入是否为「属于某个合集的视频」，若是则返回合集的分集列表，
+/// 供前端先展示勾选界面、用户选择后再调用 `bili_resolve`（传 `bvids`）只解析选中项。
+///
+/// 非合集视频 / 合集页 / 番剧入口返回 `None`（这些场景无需预览，走原解析流程）。
+#[tauri::command]
+pub async fn bili_preview(
+    input: ResolveInput,
+    state: State<'_, BiliState>,
+) -> Result<Option<CollectionPreview>, String> {
+    let sessdata = login::load_and_check(state.config_dir_opt().as_deref())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "未登录或登录态已失效，请先扫码登录".to_string())?;
+    let _ = crate::biliapi::buvid_cache::ensure_buvid().await;
+    let client = BiliClient::new(&sessdata);
+
+    // 仅视频页（BV/AV）需要预览；合集页 / 番剧走原流程
+    let target = identify(&input.input);
+    let bvid = match &target {
+        Target::Bv(b) => b.clone(),
+        Target::Av(a) => bv_from_aid(*a),
+        _ => return Ok(None),
+    };
+
+    let info = video::get_video_info(&client, &bvid)
+        .await
+        .map_err(|e| e.to_string())?;
+    if info.ugc_season.id <= 0 {
+        return Ok(None);
+    }
+
+    let episodes: Vec<CollectionEpisode> = info
+        .ugc_season
+        .episodes
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.bvid.is_empty())
+        .map(|(i, e)| CollectionEpisode {
+            index: i + 1,
+            bvid: e.bvid.clone(),
+            title: if e.title.is_empty() {
+                format!("P{}", i + 1)
+            } else {
+                e.title.clone()
+            },
+        })
+        .collect();
+
+    Ok(Some(CollectionPreview {
+        id: info.ugc_season.id.to_string(),
+        title: if info.ugc_season.title.is_empty() {
+            info.title.clone()
+        } else {
+            info.ugc_season.title.clone()
+        },
+        episodes,
+    }))
 }
 
 /// 异步解析（后台运行，区分「解析中 / 下载中」两阶段）
@@ -393,7 +488,11 @@ pub async fn bili_resolve_async(
             }));
 
         let mut group_opt: Option<TaskGroup> = None;
-        let result = match &target {
+        // 若前端已传入勾选的分集 bvid 列表，则只解析这些分集（跳过合集自动展开）
+        let result = if let Some(sel) = input.bvids.clone().filter(|v| !v.is_empty()) {
+            video::resolve_bvids(&client, sel, prefer, cb.clone()).await
+        } else {
+            match &target {
             Target::Bv(bvid) => {
                 // 先取视频详情，判断是否属于合集（ugc_season）
                 match video::get_video_info(&client, bvid).await {
@@ -480,6 +579,7 @@ pub async fn bili_resolve_async(
                 }
             }
             Target::Season(ssid) => video::resolve_season(&client, ssid, prefer, cb).await,
+            }
         };
 
         match result {
