@@ -69,6 +69,15 @@ pub struct CollectionPreview {
     pub episodes: Vec<CollectionEpisode>,
 }
 
+/// 从 `UgcSeason` 提取分集 bvid 列表（兼容 `episodes` 与 `sections[].episodes`）
+fn ugc_season_bvids(season: &crate::biliapi::types::UgcSeason) -> Vec<String> {
+    season
+        .flatten_episodes()
+        .into_iter()
+        .map(|(_, bvid, _)| bvid)
+        .collect()
+}
+
 /// 启动下载请求
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -277,15 +286,9 @@ pub async fn bili_resolve(
                 .await
                 .map_err(|e| e.to_string())?;
             if info.ugc_season.id > 0 {
-                // 直接从 view 返回的 ugc_season.episodes 取合集分集，
+                // 直接从 view 返回的 ugc_season 取合集分集（兼容 episodes / sections[].episodes），
                 // 避免再调 seasons_archives_list（该接口被风控拦截，稳定返回 -352）。
-                let mut bvids: Vec<String> = info
-                    .ugc_season
-                    .episodes
-                    .iter()
-                    .map(|e| e.bvid.clone())
-                    .filter(|b| !b.is_empty())
-                    .collect();
+                let mut bvids = ugc_season_bvids(&info.ugc_season);
                 if bvids.is_empty() {
                     bvids.push(bvid.clone());
                 }
@@ -403,19 +406,9 @@ pub async fn bili_preview(
 
     let episodes: Vec<CollectionEpisode> = info
         .ugc_season
-        .episodes
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| !e.bvid.is_empty())
-        .map(|(i, e)| CollectionEpisode {
-            index: i + 1,
-            bvid: e.bvid.clone(),
-            title: if e.title.is_empty() {
-                format!("P{}", i + 1)
-            } else {
-                e.title.clone()
-            },
-        })
+        .flatten_episodes()
+        .into_iter()
+        .map(|(i, bvid, title)| CollectionEpisode { index: i, bvid, title })
         .collect();
 
     Ok(Some(CollectionPreview {
@@ -498,15 +491,9 @@ pub async fn bili_resolve_async(
                 match video::get_video_info(&client, bvid).await {
                     Ok(info) => {
                         if info.ugc_season.id > 0 {
-                            // 直接从 view 返回的 ugc_season.episodes 取合集分集，
+                            // 直接从 view 返回的 ugc_season 取合集分集（兼容 episodes / sections[].episodes），
                             // 避免再调 seasons_archives_list（该接口被风控拦截，稳定返回 -352）。
-                            let mut bvids: Vec<String> = info
-                                .ugc_season
-                                .episodes
-                                .iter()
-                                .map(|e| e.bvid.clone())
-                                .filter(|b| !b.is_empty())
-                                .collect();
+                            let mut bvids = ugc_season_bvids(&info.ugc_season);
                             if bvids.is_empty() {
                                 bvids.push(bvid.to_string());
                             }
@@ -539,13 +526,7 @@ pub async fn bili_resolve_async(
             Target::Av(aid) => match video::get_video_info(&client, &bv_from_aid(*aid)).await {
                 Ok(info) => {
                     if info.ugc_season.id > 0 {
-                        let mut bvids: Vec<String> = info
-                            .ugc_season
-                            .episodes
-                            .iter()
-                            .map(|e| e.bvid.clone())
-                            .filter(|b| !b.is_empty())
-                            .collect();
+                        let mut bvids = ugc_season_bvids(&info.ugc_season);
                         if bvids.is_empty() {
                             bvids.push(info.bvid.clone());
                         }

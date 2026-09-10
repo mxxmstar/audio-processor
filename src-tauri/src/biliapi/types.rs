@@ -161,9 +161,58 @@ pub struct UgcSeason {
     /// 合集内全部分集（view 接口直接返回，无需再调 seasons_archives_list）
     #[serde(default)]
     pub episodes: Vec<UgcEpisode>,
+    /// 分章节形式：每个 section 里再有 episodes（B站部分合集用这种结构）
+    #[serde(default)]
+    pub sections: Vec<UgcSection>,
 }
 
-/// 合集内单个分集（view 接口 ugc_season.episodes 元素）
+impl UgcSeason {
+    /// 把 `episodes` 和 `sections[].episodes` 合并摊平，返回按 P1/P2... 编号的分集列表。
+    /// 优先使用顶层 `episodes`，为空时再遍历 `sections`。
+    pub fn flatten_episodes(&self) -> Vec<(usize, String, String)> {
+        let mut out = Vec::new();
+        let mut idx = 0usize;
+        let push = |idx: &mut usize, e: &UgcEpisode, out: &mut Vec<_>| {
+            if !e.bvid.is_empty() {
+                *idx += 1;
+                out.push((
+                    *idx,
+                    e.bvid.clone(),
+                    if e.title.is_empty() {
+                        format!("P{}", *idx)
+                    } else {
+                        e.title.clone()
+                    },
+                ));
+            }
+        };
+        if !self.episodes.is_empty() {
+            for e in &self.episodes {
+                push(&mut idx, e, &mut out);
+            }
+        } else {
+            for sec in &self.sections {
+                for e in &sec.episodes {
+                    push(&mut idx, e, &mut out);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// 合集内单个章节（B站部分合集用 sections 结构）
+#[derive(Debug, Deserialize, Default)]
+pub struct UgcSection {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub episodes: Vec<UgcEpisode>,
+}
+
+/// 合集内单个分集（view 接口 ugc_season.episodes / sections[].episodes 元素）
 #[derive(Debug, Deserialize, Default)]
 pub struct UgcEpisode {
     #[serde(default)]
