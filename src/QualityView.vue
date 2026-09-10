@@ -79,8 +79,10 @@ function backendOf(id: string): string {
 }
 
 const modelOptions = computed(() => {
+  // 音质提升只包含超分 / 修复类后端（flashsr / audiosr / voicefixer / deepfilternet）；
+  // HiFi-GAN 声码器（hifigan / bigvgan）属于「音质优化」，不应出现在本视图。
   const list = models.value.length
-    ? models.value
+    ? models.value.filter((m) => m.backend !== "hifigan")
     : [{ id: modelId.value, backend: backendOf(modelId.value) }];
   return list.map((m) => {
     const backendLabel =

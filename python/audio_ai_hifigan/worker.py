@@ -45,6 +45,7 @@ from protocol import (  # noqa: E402
     PROTOCOL_VERSION,
     SCRIPT_ROOT,
     WorkerFailure,
+    _force_utf8_stdio,
     emit,
     emit_error,
     log,
@@ -171,7 +172,9 @@ def read_manifest(model_dir: Path) -> dict[str, dict[str, Any]] | None:
             if backend not in SUPPORTED_BACKENDS:
                 continue
             result[model_id] = {
-                "file": str(entry["file"]),
+                # 顶层 `file` 仅单文件条目使用；`files` 列表式条目（如 bigvgan-48k
+                # 的目录布局）没有该字段，此处容错为空字符串（下游只用 artifacts）。
+                "file": str(entry.get("file", "")),
                 "version": str(entry.get("version", "unknown")),
                 "backend": backend,
                 "model_name": str(entry.get("model_name", "")),
@@ -316,6 +319,9 @@ def process_in_thread(
 
 
 def main() -> int:
+    # 必须在任何 emit/read_stdin_line 之前强制 stdout/stderr 为 UTF-8：Windows 上
+    # 默认按区域编码（cp936/GBK），中文进度消息会让 Rust 侧的 UTF-8 JSONL 解析失败。
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(description="HiFi-GAN audio vocoder worker")
     parser.add_argument("--model-dir", default=None)
     args = parser.parse_args()
@@ -377,11 +383,18 @@ def main() -> int:
                 pipeline.warm_up_imports()
             except Exception as error:  # noqa: BLE001
                 log(f"warm-up import failed: {type(error).__name__}: {error}")
+                detail = f"{type(error).__name__}: {error}"
+                if "bigvgan" in str(error):
+                    detail += (
+                        "；bigvgan-48k（增强版）需要先在 .venv-flashsr 安装 "
+                        "bigvgan 与 huggingface_hub："
+                        " pip install huggingface_hub 与 pip install bigvgan==2.4.1 --no-deps"
+                    )
                 emit_error(
                     request_id,
                     WorkerFailure(
                         "MODEL_RUNTIME_NOT_FOUND",
-                        f"无法导入 HiFi-GAN: {type(error).__name__}: {error}",
+                        f"无法导入 HiFi-GAN: {detail}",
                     ),
                 )
                 continue

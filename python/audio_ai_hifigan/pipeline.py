@@ -13,9 +13,11 @@ HiFi-GAN 是**声码器**（mel → waveform），与 FlashSR 的扩散超分不
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -349,7 +351,11 @@ def get_runner(generator_path: Path, device: torch.device, config: dict[str, Any
         runner = _RUNNER_CACHE.get(key)
         if runner is None:
             runner = vendor_bridge.HiFiGanRunner(config=config, device=device)
-            runner.load_model(str(generator_path))
+            # 上游（bigvgan / vendor）在加载期用 print 写 stdout，会污染 JSONL
+            # 协议流（Rust 侧解析失败）。把这段 stdout 重定向到 stderr，协议
+            # 事件 emit 走真实 stdout，不受影响。
+            with contextlib.redirect_stdout(sys.stderr):
+                runner.load_model(str(generator_path))
             _RUNNER_CACHE[key] = runner
         return runner
 
@@ -366,7 +372,8 @@ def get_bigvgan_runner(model_dir: str, device: torch.device) -> Any:
         runner = _BIGVGAN_RUNNER_CACHE.get(key)
         if runner is None:
             runner = vendor_bridge.BigVGANRunner(model_dir=model_dir, device=device)
-            runner.load_model(str(model_dir))
+            with contextlib.redirect_stdout(sys.stderr):
+                runner.load_model(str(model_dir))
             _BIGVGAN_RUNNER_CACHE[key] = runner
         return runner
 

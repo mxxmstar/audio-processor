@@ -29,6 +29,29 @@ PyYAML==6.0.3
 tqdm==4.70.0
 ```
 
+## HiFi-GAN 增强版（bigvgan-48k）额外依赖
+
+`bigvgan-48k`（前端「hifigan-48k 增强版」）复用了本 Worker 的 HiFi-GAN 后端，
+但其 `BigVGANRunner` 走的是 PyPI `bigvgan` 包（而非 FlashSR 的 vendor 快照）。
+`bigvgan` 顶层会 `import huggingface_hub`，因此**两者都必须装进 `.venv-flashsr`**，
+否则优化 `bigvgan-48k` 时回报 `MODEL_RUNTIME_NOT_FOUND: No module named 'bigvgan'`。
+
+`bigvgan` 在 PyPI 上声明了一堆推理用不到的重度依赖（pesq / nnaudio / tensorboard /
+auraloss / ninja / matplotlib），其中 `pesq`、`nnaudio` 在 Windows 上需要本地编译、
+极易失败；`matplotlib` 本项目已打桩、无需安装。因此**不要**用
+`pip install -r` 直接拉全部依赖，而用 `--no-deps` 安装、其余复用本清单已装的
+torch / numpy / librosa / scipy / soundfile：
+
+```powershell
+.\.venv-flashsr\Scripts\Activate.ps1
+python -m pip install "huggingface_hub"
+python -m pip install "bigvgan==2.4.1" --no-deps
+```
+
+> 校验：`python -c "import bigvgan; from bigvgan import BigVGAN, load_hparams_from_json, mel_spectrogram; print('ok')"`
+> 该 import 依赖 `vendor_bridge.ensure_inference_only_imports()` 先桩好 `matplotlib`，
+> 所以裸 `import bigvgan` 会报 `No module named 'matplotlib'` 属正常，Worker 进程内不受影响。
+
 ## 不需要安装
 
 `matplotlib` 与 `sklearn` 虽被上游顶层导入，但只服务于训练期绘图，

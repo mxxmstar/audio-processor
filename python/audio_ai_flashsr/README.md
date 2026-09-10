@@ -30,6 +30,22 @@ python -m pip install -r requirements-flashsr.txt
 > `python -m pip install torch --index-url https://download.pytorch.org/whl/cpu`
 > 再 `python -m pip install -r requirements-flashsr.txt --no-deps`
 
+### 1.1.1 HiFi-GAN 增强版（bigvgan-48k）的额外依赖
+
+若要用前端「hifigan-48k 增强版」（`bigvgan-48k` 模型），本 Worker 的
+`BigVGANRunner` 依赖 PyPI `bigvgan` 包，它顶层会 `import huggingface_hub`。
+**必须额外装进同一个 `.venv-flashsr`**，否则优化时报
+`No module named 'bigvgan'`。用 `--no-deps` 避免拉取用不到的重度依赖
+（pesq / nnaudio 在 Windows 上需本地编译、易失败；matplotlib 已打桩）：
+
+```powershell
+.\.venv-flashsr\Scripts\Activate.ps1
+python -m pip install "huggingface_hub"
+python -m pip install "bigvgan==2.4.1" --no-deps
+```
+
+详见 `requirements-flashsr.txt` 的「HiFi-GAN 增强版额外依赖」一节。
+
 ### 1.2 CUDA 版
 
 先按本机驱动安装匹配的 PyTorch（示例为 CUDA 11.8）：
