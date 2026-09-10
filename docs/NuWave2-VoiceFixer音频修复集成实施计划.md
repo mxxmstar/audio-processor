@@ -246,7 +246,7 @@ VoiceFixer 属于"音频品质提升"域，**直接加进既有的 `QualityView.
 | **2 · Rust 侧** ✅ **已完成** | `backend.rs` 新增 `VoiceFixer` 枚举与路由；`ai_worker.rs` 新增 `WorkerSpec::voicefixer()` + `find_python_voicefixer()`；`manifest.json` 条目 | 运行时检查可见、可安装 |
 | **3 · 前端** ✅ **已完成** | §3.6 下拉档位 + mode 选择 + 采样率联动 | 可选、可取消、进度可见 |
 | **4 · 测试** ✅ **已完成** | fake 协议回归；真实权重修复用例（含噪声/削波/低带宽样本）；UI 冒烟 | 测试通过（见 §4.2） |
-| **5 · NuWave2 评估** | 评估 NuWave2 是否值得做（对比 AudioSR 的差异化价值、Google Drive 权重方案、旧版 lightning 环境可行性）→ 决定实现或搁置 | 评估结论；若实施则复用阶段 1–4 流程 |
+| **5 · NuWave2 评估** ✅ **已完成（结论：搁置）** | 评估 NuWave2 是否值得做（对比 AudioSR 的差异化价值、Google Drive 权重方案、旧版 lightning 环境可行性）→ 决定实现或搁置 | 评估结论见 §4.3 |
 
 ### 4.1 阶段 0 实测结论（2026-09-09，验证机：Python 3.10 / CPU / 无 GPU / 12 线程）
 
@@ -363,6 +363,28 @@ models/cache/voicefixer-home/.cache/voicefixer/synthesis_module/44100/model.ckpt
 | Rust 集成测试 `voicefixer_real_worker_forward_pass`（`--ignored`） | 通过（6 s 音频 9.7 s） |
 | 回归：`audio_quality` 全部 Rust 测试 27 项、`audio_ai` 16 项、`audio_ai_hifigan` 17 项 | 全通过 |
 
+### 4.3 阶段 5 · NuWave2 评估结论（2026-09-10）：**搁置，不实施**
+
+| 维度 | 核实结果 | 判定 |
+|---|---|---|
+| **功能差异化** | 官方 README 定位为"通用神经音频**上采样**"，目标 48 kHz（另有 16 kHz 目标 checkpoint）。与既有 `flashsr`（快）/ `audiosr-basic`（慢但高保真）**同为 48 kHz 超分**，差异仅在"支持任意输入采样率（3.2 k~48 kHz）"与"面向通用音频（含音乐）" | ⚠️ **边际价值低** |
+| **权重获取** | 官方仅提供 **Google Drive** 两个直链（`11t0cQYx6ZadKQjmfGnqxUUH2UEk5Yzk7` / `1IZihqb0LKHLtqRjyhHBGxXHJhUwskVRo`），大文件需确认令牌；检索**未发现** HF / 社区镜像；阶段 0 已实证本环境连 Zenodo 也返回 403 | ❌ **阻塞** |
+| **运行环境** | 实测：Python 3.10 + `torch==1.13.1+cpu` + `numpy==1.26.4` + `pytorch-lightning==1.2.10` **可正常导入**（`numpy` 必须 <2，否则 torch 1.13 报 `_ARRAY_API not found`）。但这是**第 4 套 venv**，与现有 3 套（2.11 / 2.14 / 2.1）互不兼容 | ⚠️ **可行但代价高** |
+| **工程形态** | 无 PyPI 包；需 `git clone --recursive`（submodule 仅训练用，可跳过）后 vendor 化 `inference.py` / `model.py` / `diffusion.py` / `lightning_model.py`（同 FlashSR 的 vendor 做法）；推理为扩散模型，CPU 上比 FlashSR 更慢 | ⚠️ 重复投入 |
+| **许可** | BSD-3-Clause ✅（无商用障碍，非阻塞因素） | ✅ |
+
+**结论**：收益（第三个 48 kHz 超分档位）< 成本（第 4 套 venv + 权重自托管/镜像 + vendor 化 + 复用阶段 1–4 全流程），
+故 **NuWave2 搁置**；`python/audio_ai_nuwave2/` 与 `requirements-nuwave2.txt` **不创建**。
+
+**重启条件（满足任一再评估）**
+
+1. 出现**可直连**的权重直链（自托管 / HF 镜像 / 社区复现），使 manifest 能登记 `source`；
+2. 用户明确提出「任意输入采样率（3.2 k / 8 k / 16 k）上采样到 48 kHz」或「非语音通用音频超分」需求，
+   且 FlashSR / AudioSR 实测不达标；
+3. 出现**去掉 lightning 依赖**的纯 torch 推理实现（可并入现有 venv，成本大幅下降）。
+
+> 若将来重启，直接复用阶段 1–4 的目录结构与流程即可（本计划已给出完整范式）。
+
 ---
 
 ## 5. 风险与缺陷预登记表（R1–Rn）
@@ -370,14 +392,14 @@ models/cache/voicefixer-home/.cache/voicefixer/synthesis_module/44100/model.ckpt
 | # | 现象（预期风险） | 根因 | 缓解 / 修复 |
 |---|---|---|---|
 | **R1** | 权重被下载到 `~/.cache/voicefixer/`，不在 `models/cache/` | VoiceFixer 硬编码缓存路径 | ✅ 阶段 0 已定稿：设 **`USERPROFILE`**（Windows 只认它，`HOME` 无效）指向 `models/cache/voicefixer-home`，且需在 import 前设置并全程保持；纳入 `selfcheck` 断言（§4.1 ②） |
-| R2 | 输出被强制成 48 kHz | 复用 FlashSR 的采样率校验 | §3.5：采样率校验按后端区分，VoiceFixer 走 44.1 kHz |
-| R3 | 拿去修音乐效果差 / 用户误解 | VoiceFixer 面向**人声** | UI 文案标注"面向人声/语音"；音乐场景引导到 FlashSR/AudioSR |
-| R4 | 长音频内存/耗时不可控 | 整段 mel 修复 | 分块处理 + 块间进度/取消（阶段 1 实测块长与重叠） |
-| R5 | `restore()` 内部不可打断 → 取消失效 | API 为黑盒 | 按块调用 + 块间检查取消标志（同音频分块 / 图像 tile 思路） |
-| R6 | **NuWave2 权重在 Google Drive，下载需确认令牌** | 官方托管方式 | 若实施 NuWave2：改自托管直链/镜像后纳入 manifest；`model_manager` 需支持相应下载方式 |
-| R7 | **NuWave2 依赖 pytorch-lightning==1.2.10（2021）** 与现代 torch 不兼容 | 旧版 pin | 若实施：独立旧版 venv；或绕过 lightning 自行加载 checkpoint（阶段 5 评估） |
-| R8 | NuWave2 与 AudioSR 功能重叠，投入产出比低 | 都是→48 kHz 超分 | §1.4：列为次优先，阶段 5 先评估差异化价值再决定 |
-| R9 | 与现有音频后端互相影响 | 共用 venv / 依赖 | 独立 venv；阶段 0 先验证能否复用，不能则新建 |
+| R2 | 输出被强制成 48 kHz | 复用 FlashSR 的采样率校验 | ✅ 已修复：`validate_output_sample_rate()` 按后端校验 + `default_output_sample_rate()`（VoiceFixer 44 100）；阶段 4 实测输出确为 44.1 kHz |
+| R3 | 拿去修音乐效果差 / 用户误解 | VoiceFixer 面向**人声** | ✅ 已缓解：UI 文案标注"面向人声/语音"并引导音乐场景回 FlashSR/AudioSR |
+| R4 | 长音频内存/耗时不可控 | 整段 mel 修复 | ✅ 已缓解：外层 10 s 分块 + 逐块流式落盘；60 s 实测峰值 RSS 1.85 GB、0.82× 实时 |
+| R5 | `restore()` 内部不可打断 → 取消失效 | API 为黑盒 | ✅ 已缓解：按块调用 + 块间检查取消标志；阶段 4 实测取消能停在块边界并无残留 |
+| R6 | **NuWave2 权重在 Google Drive，下载需确认令牌** | 官方托管方式 | ⏸ NuWave2 已搁置（§4.3）；若重启：必须先有自托管直链/镜像才能进 manifest |
+| R7 | **NuWave2 依赖 pytorch-lightning==1.2.10（2021）** 与现代 torch 不兼容 | 旧版 pin | ⏸ 阶段 5 实测**可行**：Python 3.10 + `torch==1.13.1+cpu` + `numpy<2` + PL 1.2.10 可导入；但需第 4 套 venv（与现有 2.11/2.14/2.1 不兼容） |
+| R8 | NuWave2 与 AudioSR 功能重叠，投入产出比低 | 都是→48 kHz 超分 | ⏸ 阶段 5 结论成立 → **搁置**（§4.3），并附 3 条重启条件 |
+| R9 | 与现有音频后端互相影响 | 共用 venv / 依赖 | ✅ 已解决：独立 `.venv-voicefixer`；回归测试确认 AudioSR/DeepFilterNet/HiFi-GAN 不受影响 |
 | R10 | 修复结果"没变化"或过度平滑 | 生成式修复的固有特性 + mode 选择 | 暴露 mode 0/1/2 供用户切换；默认 mode 0；文档说明各 mode 差异 |
 | R11 | 依赖安装失败（voicefixer 的传递依赖） | pip 包依赖链 | `requirements-voicefixer.txt` 锁版本；阶段 0 实测组合 |
 
