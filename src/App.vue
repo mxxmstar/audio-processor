@@ -350,6 +350,7 @@ onUnmounted(() => {
           v-if="active === 'download'"
           key="view-download"
           :logged-in="loggedIn"
+          @request-login="openQr"
         />
         <recognizer-view v-else-if="active === 'recognize'" key="view-recognize" />
         <history-view

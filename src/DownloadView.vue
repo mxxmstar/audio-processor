@@ -7,6 +7,8 @@ import {
   FolderOpenOutlined,
   SearchOutlined,
   DownloadOutlined,
+  QrcodeOutlined,
+  UserOutlined,
 } from "@ant-design/icons-vue";
 import type { MenuProps } from "ant-design-vue";
 
@@ -90,8 +92,9 @@ interface ResolveFinished {
   resolved: number;
 }
 
-// 从左侧栏接收登录态（登录态统一在 App.vue 管理）
-const { loggedIn } = defineProps<{ loggedIn: boolean }>();
+// 从左侧栏接收登录态（登录态统一在 App.vue 管理）；未登录时请求拉起登录二维码
+const props = defineProps<{ loggedIn: boolean }>();
+const emit = defineEmits<{ (e: "requestLogin"): void }>();
 
 const inputUrl = ref("");
 const preferFormat = ref("1080P");
@@ -271,7 +274,7 @@ async function pickDir() {
 }
 
 async function doResolve() {
-  if (!loggedIn) {
+  if (!props.loggedIn) {
     message.value = "请先扫码登录";
     return;
   }
@@ -540,7 +543,7 @@ onActivated(() => {
 
 <template>
   <div class="panel">
-    <a-card v-if="loggedIn" title="B站下载" :bordered="false" class="main-card">
+    <a-card v-if="props.loggedIn" title="B站下载" :bordered="false" class="main-card">
       <a-form layout="vertical">
         <a-form-item label="视频地址">
           <a-input
@@ -791,6 +794,22 @@ onActivated(() => {
         </a-collapse-panel>
       </a-collapse>
     </a-card>
+
+    <!-- 未登录：给出明确提示与一键登录入口，避免内容区空白（白屏） -->
+    <a-card v-else title="B站下载" :bordered="false" class="main-card login-tip">
+      <a-result status="info" title="尚未登录 B站账号">
+        <template #subTitle>
+          <p>使用本功能前请先在左侧栏点击「扫码登录」，或点击下方按钮拉起二维码。</p>
+          <p class="muted">登录状态仅影响「B站下载」，不影响音频识别、历史记录等其它模块。</p>
+        </template>
+        <template #extra>
+          <a-button type="primary" @click="emit('requestLogin')">
+            <template #icon><QrcodeOutlined /></template>
+            扫码登录
+          </a-button>
+        </template>
+      </a-result>
+    </a-card>
   </div>
 </template>
 
@@ -802,6 +821,13 @@ onActivated(() => {
 }
 .main-card {
   background: #fff;
+}
+.login-tip {
+  margin-top: 1rem;
+}
+.muted {
+  color: #8a94a6;
+  font-size: 0.85rem;
 }
 .msg {
   margin: 1rem 0;
