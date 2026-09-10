@@ -228,6 +228,8 @@ pub async fn bili_resolve(
 
     let mode = parse_mode(input.mode.as_deref().unwrap_or("audio"));
     let prefer = parse_format(input.prefer_format.as_deref().unwrap_or("1080P"));
+    // 预取 buvid3/buvid4 指纹，规避 web-space 接口 -352 风控（失败不致命）
+    let _ = crate::biliapi::buvid_cache::ensure_buvid().await;
     let client = BiliClient::new(&sessdata);
 
     // 识别目标类型并分发解析
@@ -325,6 +327,8 @@ pub async fn bili_resolve_async(
 
     let mode = parse_mode(input.mode.as_deref().unwrap_or("audio"));
     let prefer = parse_format(input.prefer_format.as_deref().unwrap_or("1080P"));
+    // 预取 buvid3/buvid4 指纹，规避 web-space 接口 -352 风控（失败不致命）
+    let _ = crate::biliapi::buvid_cache::ensure_buvid().await;
     let client = BiliClient::new(&sessdata);
     let target = identify(&input.input);
     let root = input.output_dir.clone().unwrap_or_else(|| {

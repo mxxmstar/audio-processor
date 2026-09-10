@@ -47,6 +47,10 @@ pub fn run() {
                 ffmpeg_dir.exists()
             );
             crate::biliapi::media::set_ffmpeg_dir(Some(&ffmpeg_dir));
+            // 启动即预取 buvid3/buvid4 指纹，规避后续 web-space 接口 -352 风控
+            let _ = tauri::async_runtime::spawn(async {
+                let _ = crate::biliapi::buvid_cache::ensure_buvid().await;
+            });
             Ok(())
         })
         // 注册命令，使前端可通过 invoke 调用

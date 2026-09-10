@@ -28,12 +28,25 @@ impl BiliClient {
         }
     }
 
-    /// 构造带标准请求头的 GET 配置（含 SESSDATA Cookie + Referer）。
+    /// 构造带标准请求头的 GET 配置（含 SESSDATA + buvid 指纹 Cookie + Referer）。
     /// 对齐 Go 版 `MakeHeader`（`Mozilla/5.0` UA 由 http_client 默认提供）。
+    ///
+    /// `buvid3`/`buvid4` 用于绕过 B 站风控（`web-space` 系接口缺之会返回 -352）。
     pub fn get(&self, url: &str) -> RequestConfig {
-        let mut cfg = RequestConfig::new(url).method(HttpMethod::GET);
+        let mut cookie = String::new();
         if !self.sessdata.is_empty() {
-            cfg = cfg.header("Cookie", format!("SESSDATA={}", self.sessdata));
+            cookie.push_str(&format!("SESSDATA={}", self.sessdata));
+        }
+        let buvid = crate::biliapi::buvid_cache::buvid_cookie();
+        if !buvid.is_empty() {
+            if !cookie.is_empty() {
+                cookie.push_str("; ");
+            }
+            cookie.push_str(&buvid);
+        }
+        let mut cfg = RequestConfig::new(url).method(HttpMethod::GET);
+        if !cookie.is_empty() {
+            cfg = cfg.header("Cookie", cookie);
         }
         cfg.header("Referer", "https://www.bilibili.com")
     }

@@ -13,8 +13,10 @@
 //! - `login`   - 扫码登录 / 登录态检查 / 持久化封装
 //! - `storage` - SESSDATA / WBI key 落盘存储（阶段 4）
 //! - `wbi_cache` - WBI mixinKey 拉取与 24h 内存+落盘缓存
+//! - `buvid_cache` - buvid3/buvid4 指纹 Cookie 拉取与缓存（规避 -352 风控）
 //! - `error`   - 错误类型
 
+pub mod buvid_cache;
 pub mod client;
 pub mod error;
 pub mod login;
