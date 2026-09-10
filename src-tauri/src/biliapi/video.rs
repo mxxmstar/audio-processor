@@ -113,8 +113,8 @@ pub async fn get_fav_list(
     Ok(data.medias.unwrap_or_default())
 }
 
-/// 获取合集首个视频 bvid（无需 WBI 签名）
-/// 对应 `x/polymer/web-space/seasons_archives_list`
+/// 获取合集首个视频 bvid
+/// 对应 `x/polymer/web-space/seasons_archives_list`（已被 B 站强制要求 WBI 签名）
 pub async fn get_seasons_archives_first_bvid(
     client: &BiliClient,
     mid: &str,
@@ -125,6 +125,8 @@ pub async fn get_seasons_archives_first_bvid(
         .query("mid", mid.to_string())
         .query("season_id", season_id.to_string())
         .query("web_location", "333.1007");
+    // 该接口已被 B 站强制要求 WBI 签名，未签名会返回 -352（请求被拦截）
+    let cfg = client.with_wbi(cfg).await?;
     let data = client.send_json::<types::SeasonsArchives>(cfg).await?;
     data.episodes
         .first()
@@ -200,6 +202,8 @@ pub async fn get_collection_bvids(
             .query("page_num", page_num.to_string())
             .query("page_size", PAGE_SIZE.to_string())
             .query("web_location", "333.1007");
+        // 该接口已被 B 站强制要求 WBI 签名，未签名会返回 -352（请求被拦截）
+        let cfg = client.with_wbi(cfg).await?;
         client.send_json::<CollData>(cfg).await
     }
 
