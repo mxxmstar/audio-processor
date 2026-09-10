@@ -48,8 +48,17 @@ impl BiliClient {
 
     /// 发送请求并将响应解析为 `BaseRes<T>`，校验 code==0。
     pub async fn send_json<T: serde::de::DeserializeOwned>(&self, cfg: RequestConfig) -> Result<T> {
+        let url = cfg.url.clone();
         let resp: crate::http_client::types::HttpResponse = self.client.send_expect_success(cfg).await?;
         let base: crate::biliapi::types::BaseRes<T> = resp.json::<crate::biliapi::types::BaseRes<T>>()?;
+        if base.code != 0 {
+            println!(
+                "[bili-debug] 接口返回非零业务码 code={} url={} body={}",
+                base.code,
+                url,
+                resp.body.chars().take(500).collect::<String>()
+            );
+        }
         base.into_result()
     }
 }

@@ -400,16 +400,35 @@ async fn resolve_videos_parallel(
 
     let mut results = Vec::with_capacity(handles.len());
     let mut done = 0usize;
+    let mut skipped = 0usize;
     for h in handles {
         let (res, title) = h.await.map_err(|e| {
             crate::biliapi::error::BiliApiError::Other(format!("解析任务被取消: {e}"))
         })?;
-        let res = res?;
         done += 1;
+        match res {
+            Ok(r) => results.push(r),
+            Err(e) => {
+                skipped += 1;
+                println!("[bili] 跳过解析失败视频 {}: {}", title, e);
+            }
+        }
         if let Some(cb) = &on_resolve {
             cb(done, total, &title);
         }
-        results.push(res);
+    }
+    if results.is_empty() && skipped > 0 {
+        return Err(crate::biliapi::error::BiliApiError::Other(format!(
+            "合集内全部 {} 个视频均解析失败",
+            skipped
+        )));
+    }
+    if skipped > 0 {
+        println!(
+            "[bili] 合集解析完成：成功 {}，跳过失败 {}",
+            results.len(),
+            skipped
+        );
     }
     Ok(results)
 }
