@@ -275,9 +275,12 @@ async function cancel(taskId: string) {
 async function installModel() {
   installing.value = true;
   try {
+    // 注意：该命令声明为 `#[tauri::command(rename_all = "snake_case")]`，
+    // 参数名必须是 snake_case（model_id），与 `enhance_image_cancel` 的
+    // `task_id` 一致；写成 modelId 会报 missing required key model_id。
     const r = await invoke<{ modelId: string; status: string; message: string }>(
       "enhance_image_download_model",
-      { modelId: modelId.value, workers: 8 }
+      { model_id: modelId.value, workers: 8 }
     );
     message.success(r.message);
     await checkRuntime();
