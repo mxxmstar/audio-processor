@@ -402,14 +402,40 @@ function clearAllPreview() {
   previewSelected.value = new Set();
 }
 
-// 统一封面 URL 协议：B站封面多为 http:// 或 //（协议相对），
-// Tauri 窗口为 https 上下文，http 图片会被当作混合内容拦截，这里统一升级为 https
-function coverUrl(c: string): string {
-  if (!c) return c;
-  if (c.startsWith("//")) return "https:" + c;
-  if (c.startsWith("http://")) return "https://" + c.slice("http://".length);
-  return c;
-}
+// 封面图懒加载指令：Tauri webview 在部分环境下无法直连外网，
+// 故由 Rust 侧 fetch_image 命令代理下载图片，返回 base64 data URL 后赋给 src。
+// 仅当图片进入视口（含 300px 预加载边距）时才发起请求，避免一次性拉取全部分集图。
+const coverObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const el = entry.target as HTMLImageElement;
+      const url = el.dataset.cover || "";
+      if (url && !el.getAttribute("data-loaded")) {
+        el.setAttribute("data-loaded", "1");
+        invoke<string>("fetch_image", { url })
+          .then((d) => {
+            el.src = d;
+          })
+          .catch(() => {
+            el.removeAttribute("data-loaded");
+          });
+      }
+      coverObserver.unobserve(el);
+    }
+  },
+  { rootMargin: "300px" }
+);
+
+const vCover = {
+  mounted(el: HTMLImageElement, binding: { value: string }) {
+    el.dataset.cover = binding.value;
+    coverObserver.observe(el);
+  },
+  unmounted(el: HTMLImageElement) {
+    coverObserver.unobserve(el);
+  },
+};
 
 async function doDownload() {
   if (tasks.value.length === 0) return;
@@ -953,10 +979,9 @@ onActivated(() => {
             <span class="ep-check">{{ previewSelected.has(item.bvid) ? "✓" : "" }}</span>
             <img
               v-if="item.cover"
-              :src="coverUrl(item.cover)"
+              v-cover="item.cover"
               class="ep-cover"
               alt=""
-              loading="lazy"
               @click.stop="selectEpisode(index, $event)"
             />
             <span class="ep-index">P{{ item.index }}</span>

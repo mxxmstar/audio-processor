@@ -76,6 +76,7 @@ pub fn run() {
             commands::bili::bili_resolve,
             commands::bili::bili_resolve_async,
             commands::bili::bili_preview,
+            commands::bili::fetch_image,
             commands::bili::bili_start_download,
             commands::bili::bili_pause_download,
             commands::bili::bili_stop_download,

@@ -23,6 +23,29 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+use base64::Engine;
+
+/// 代理下载图片并返回 base64 data URL。
+///
+/// 部分运行环境下 Tauri 的 webview 进程无法直连外网（Rust 侧可联网），
+/// 导致 `<img>` 直接加载 B 站封面失败。改由 Rust 侧（可联网）下载后回传 data URL。
+#[tauri::command]
+pub async fn fetch_image(url: String) -> Result<String, String> {
+    let client = crate::http_client::client::HttpClient::new();
+    let bytes = client
+        .get_bytes(&url)
+        .await
+        .map_err(|e: crate::http_client::error::HttpClientError| e.to_string())?;
+    let mime = if url.ends_with(".png") {
+        "image/png"
+    } else if url.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", mime, b64))
+}
 
 /// 解析请求参数
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

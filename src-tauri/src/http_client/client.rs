@@ -151,6 +151,30 @@ impl HttpClient {
         self.send(config).await
     }
 
+    /// 下载原始二进制（如图片），返回字节。用于前端 webview 无法直连外网时由 Rust 侧代理图片。
+    pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, HttpClientError> {
+        let resp = self
+            .inner
+            .get(url)
+            .header("User-Agent", "Mozilla/5.0")
+            .header("Referer", "https://www.bilibili.com")
+            .send()
+            .await
+            .map_err(HttpClientError::from)?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(HttpClientError::HttpStatusError {
+                status,
+                body: format!("图片下载失败，状态码 {}", status),
+            });
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| HttpClientError::ResponseParseError(format!("读取图片字节失败: {}", e)))?;
+        Ok(bytes.to_vec())
+    }
+
     /// 发送通用 HTTP 请求（核心方法）
     ///
     /// 根据 `RequestConfig` 中的配置构造并发送请求。
