@@ -418,6 +418,15 @@ pub async fn bili_preview(
         })
         .collect();
 
+    // 诊断：确认合集分集封面是否成功取到
+    let empty_cover = episodes.iter().filter(|e| e.cover.is_empty()).count();
+    println!(
+        "[bili-debug] preview episodes={} empty_cover={} first_cover={:?}",
+        episodes.len(),
+        empty_cover,
+        episodes.first().map(|e| e.cover.clone())
+    );
+
     Ok(Some(CollectionPreview {
         id: info.ugc_season.id.to_string(),
         title: if info.ugc_season.title.is_empty() {
