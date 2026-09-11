@@ -176,6 +176,12 @@ impl UgcSeason {
         let push = |idx: &mut usize, e: &UgcEpisode, out: &mut Vec<_>| {
             if !e.bvid.is_empty() {
                 *idx += 1;
+                // 封面：顶层 episodes 分支在 `cover`，sections 分支在 `arc.pic`
+                let cover = if !e.cover.is_empty() {
+                    e.cover.clone()
+                } else {
+                    e.arc.pic.clone()
+                };
                 out.push((
                     *idx,
                     e.bvid.clone(),
@@ -184,7 +190,7 @@ impl UgcSeason {
                     } else {
                         e.title.clone()
                     },
-                    e.cover.clone(),
+                    cover,
                 ));
             }
         };
@@ -225,9 +231,19 @@ pub struct UgcEpisode {
     pub cid: i64,
     #[serde(default)]
     pub title: String,
-    /// 分集封面（view 接口 ugc_season.episodes[].cover）
+    /// 分集封面（view 接口 ugc_season.episodes[].cover，顶层 episodes 分支才有）
     #[serde(default)]
     pub cover: String,
+    /// sections 分支的分集把封面放在 `arc.pic` 里
+    #[serde(default)]
+    pub arc: UgcArc,
+}
+
+/// 合集分集的稿件信息（sections 分支下封面在 `arc.pic`）
+#[derive(Debug, Deserialize, Default)]
+pub struct UgcArc {
+    #[serde(default)]
+    pub pic: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

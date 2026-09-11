@@ -402,6 +402,15 @@ function clearAllPreview() {
   previewSelected.value = new Set();
 }
 
+// 统一封面 URL 协议：B站封面多为 http:// 或 //（协议相对），
+// Tauri 窗口为 https 上下文，http 图片会被当作混合内容拦截，这里统一升级为 https
+function coverUrl(c: string): string {
+  if (!c) return c;
+  if (c.startsWith("//")) return "https:" + c;
+  if (c.startsWith("http://")) return "https://" + c.slice("http://".length);
+  return c;
+}
+
 async function doDownload() {
   if (tasks.value.length === 0) return;
   downloading.value = true;
@@ -944,7 +953,7 @@ onActivated(() => {
             <span class="ep-check">{{ previewSelected.has(item.bvid) ? "✓" : "" }}</span>
             <img
               v-if="item.cover"
-              :src="item.cover.startsWith('//') ? 'https:' + item.cover : item.cover"
+              :src="coverUrl(item.cover)"
               class="ep-cover"
               alt=""
               loading="lazy"
