@@ -1143,6 +1143,8 @@ onActivated(() => {
   padding: 0.4rem 0.6rem;
   cursor: pointer;
   user-select: none;
+  width: 100%;
+  box-sizing: border-box;
 }
 .ep-item:hover {
   background: #f5f8ff;
@@ -1182,6 +1184,8 @@ onActivated(() => {
 }
 .ep-title {
   margin-left: 0.1rem;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
