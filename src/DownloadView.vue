@@ -97,6 +97,7 @@ interface CollectionEpisode {
   index: number;
   bvid: string;
   title: string;
+  cover: string;
 }
 interface CollectionPreview {
   id: string;
@@ -941,6 +942,14 @@ onActivated(() => {
             @click="selectEpisode(index, $event)"
           >
             <span class="ep-check">{{ previewSelected.has(item.bvid) ? "✓" : "" }}</span>
+            <img
+              v-if="item.cover"
+              :src="item.cover.startsWith('//') ? 'https:' + item.cover : item.cover"
+              class="ep-cover"
+              alt=""
+              loading="lazy"
+              @click.stop="selectEpisode(index, $event)"
+            />
             <span class="ep-index">P{{ item.index }}</span>
             <span class="ep-title">{{ item.title }}</span>
           </a-list-item>
@@ -1128,6 +1137,14 @@ onActivated(() => {
   min-width: 2.4rem;
   color: #8a94a6;
   font-variant-numeric: tabular-nums;
+}
+.ep-cover {
+  width: 4.2rem;
+  height: 2.6rem;
+  object-fit: cover;
+  border-radius: 4px;
+  flex: none;
+  background: #f0f0f0;
 }
 .ep-title {
   margin-left: 0.1rem;

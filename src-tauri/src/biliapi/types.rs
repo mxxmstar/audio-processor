@@ -169,7 +169,8 @@ pub struct UgcSeason {
 impl UgcSeason {
     /// 把 `episodes` 和 `sections[].episodes` 合并摊平，返回按 P1/P2... 编号的分集列表。
     /// 优先使用顶层 `episodes`，为空时再遍历 `sections`。
-    pub fn flatten_episodes(&self) -> Vec<(usize, String, String)> {
+    /// 元组为 `(序号, bvid, 标题, 封面)`.
+    pub fn flatten_episodes(&self) -> Vec<(usize, String, String, String)> {
         let mut out = Vec::new();
         let mut idx = 0usize;
         let push = |idx: &mut usize, e: &UgcEpisode, out: &mut Vec<_>| {
@@ -183,6 +184,7 @@ impl UgcSeason {
                     } else {
                         e.title.clone()
                     },
+                    e.cover.clone(),
                 ));
             }
         };
@@ -223,6 +225,9 @@ pub struct UgcEpisode {
     pub cid: i64,
     #[serde(default)]
     pub title: String,
+    /// 分集封面（view 接口 ugc_season.episodes[].cover）
+    #[serde(default)]
+    pub cover: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

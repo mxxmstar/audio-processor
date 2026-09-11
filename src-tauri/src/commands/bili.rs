@@ -55,6 +55,8 @@ pub struct CollectionEpisode {
     pub bvid: String,
     /// 分集标题
     pub title: String,
+    /// 分集封面图 URL
+    pub cover: String,
 }
 
 /// 合集预览结果：视频属于某个合集时返回分集列表，供前端勾选
@@ -74,7 +76,7 @@ fn ugc_season_bvids(season: &crate::biliapi::types::UgcSeason) -> Vec<String> {
     season
         .flatten_episodes()
         .into_iter()
-        .map(|(_, bvid, _)| bvid)
+        .map(|(_, bvid, _, _)| bvid)
         .collect()
 }
 
@@ -408,7 +410,12 @@ pub async fn bili_preview(
         .ugc_season
         .flatten_episodes()
         .into_iter()
-        .map(|(i, bvid, title)| CollectionEpisode { index: i, bvid, title })
+        .map(|(i, bvid, title, cover)| CollectionEpisode {
+            index: i,
+            bvid,
+            title,
+            cover,
+        })
         .collect();
 
     Ok(Some(CollectionPreview {
